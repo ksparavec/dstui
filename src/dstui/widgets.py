@@ -39,6 +39,10 @@ class AssistantMessage(Markdown):
         super().__init__(safe(markdown))
 
 
+# Collapsible annotates ``title`` as str, but hands it to CollapsibleTitle, which takes str or
+# Content and parses markup only in a str. Titles are Content, so a tool name is never markup.
+
+
 class ReasoningBlock(Collapsible):
     """The model's reasoning for one step, collapsed by default."""
 
@@ -46,7 +50,7 @@ class ReasoningBlock(Collapsible):
 
     def __init__(self, text: str) -> None:
         text = safe(text)
-        super().__init__(Static(text, markup=False), title=Content("thinking"), collapsed=True)
+        super().__init__(Static(text, markup=False), title=Content("thinking"), collapsed=True)  # type: ignore[arg-type]
         self.text = text
 
 
@@ -58,7 +62,7 @@ class ToolCallBlock(Collapsible):
     def __init__(self, call_id: str, tool_name: str, arguments: str) -> None:
         body = Static(markup=False)
         tool_name = safe(tool_name)
-        super().__init__(body, title=Content(f"tool: {tool_name}"), collapsed=True)
+        super().__init__(body, title=Content(f"tool: {tool_name}"), collapsed=True)  # type: ignore[arg-type]
         self._body = body
         self.call_id = call_id
         self.tool_name = tool_name
@@ -72,7 +76,7 @@ class ToolCallBlock(Collapsible):
         self.is_error = is_error
         if is_error:
             self.add_class("-error")
-            self.title = Content(f"tool: {self.tool_name} (error)")
+            self.title = Content(f"tool: {self.tool_name} (error)")  # type: ignore[assignment]
         self._body.update(Content(self._body_text()))
 
     def _body_text(self) -> str:
