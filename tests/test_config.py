@@ -151,6 +151,7 @@ def test_parse_args_defaults(
         max_tokens=None,
         api_key_set=False,
     )
+    assert settings.needs_deepseek_key is True  # a property: not part of the equality above
 
 
 def test_parse_args_accepts_every_long_option(
@@ -220,14 +221,19 @@ def test_parse_args_expands_a_leading_tilde_in_paths(
 ) -> None:
     home = tmp_path / "home"
     (home / "project").mkdir(parents=True)
+    (home / "dsh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (home / "p.yml").write_text("[]\n", encoding="utf-8")
     monkeypatch.chdir(workspace)  # a literal "~" would land here, inside the workspace
     monkeypatch.setenv("HOME", str(home))
+    argv = ["--workspace=~/project", "--data-dir=~/data", "--dsh-bin=~/dsh", "--patch=~/p.yml"]
 
     # the shell leaves "~" alone after "--opt=", so dstui must expand it
-    settings = parse_args(["--workspace=~/project", "--data-dir=~/data"], env={"HOME": str(home)})
+    settings = parse_args(argv, env={"HOME": str(home)})
 
     assert settings.workspace == home / "project"
     assert settings.data_dir == home / "data"
+    assert settings.dsh_bin == home / "dsh"
+    assert settings.extra_patches == (home / "p.yml",)
     assert list(workspace.iterdir()) == []
 
 
@@ -298,7 +304,12 @@ def test_parse_args_rejects_an_unknown_choice(
 
 @pytest.mark.parametrize(
     ("option", "label"),
-    [("--workspace", "argument -w/--workspace"), ("--data-dir", "argument --data-dir")],
+    [
+        ("--workspace", "argument -w/--workspace"),
+        ("--data-dir", "argument --data-dir"),
+        ("--dsh-bin", "argument --dsh-bin"),
+        ("--patch", "argument --patch"),
+    ],
 )
 def test_parse_args_rejects_an_empty_path(
     option: str,
@@ -443,28 +454,21 @@ def test_parse_args_requires_a_model_for_another_provider(
     assert "required with --provider router-vllm" in err
 
 
-def test_parse_args_default_provider_needs_the_deepseek_key(
-    workspace: Path, home_env: dict[str, str]
-) -> None:
-    settings = parse_args(["-w", str(workspace)], env=home_env)
-
-    assert settings.provider == "deepseek-official"
-    assert settings.needs_deepseek_key is True
-    assert settings.dsh_bin is None
-    assert settings.extra_patches == ()
-
-
 @pytest.mark.parametrize("option", ["--dsh-bin", "--patch"])
-def test_parse_args_rejects_a_missing_file(
+@pytest.mark.parametrize("name", ["nope", ""], ids=["missing", "directory"])
+def test_parse_args_rejects_a_path_that_is_not_a_file(
     option: str,
+    name: str,
     workspace: Path,
     home_env: dict[str, str],
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    err = _parse_error(["-w", str(workspace), option, str(tmp_path / "nope")], home_env, capsys)
+    target = tmp_path / name  # "" -> tmp_path itself, a directory
 
-    assert f"{tmp_path / 'nope'} is not a file" in err
+    err = _parse_error(["-w", str(workspace), option, str(target)], home_env, capsys)
+
+    assert f"argument {option}: {target} is not a file" in err
 
 
 # ----------------------------------------------------------------------- build_harness_config
@@ -501,61 +505,66 @@ def test_build_harness_config_writes_the_session_log_patch(settings: Settings) -
     assert json.loads(settings.patch_file.read_text(encoding="utf-8")) == SESSION_LOG_PATCH
 
 
-def _expected_config(settings: Settings) -> DeepSeekHarnessConfig:
+def _expected_config(settings: Settings, **env: str) -> DeepSeekHarnessConfig:
     return DeepSeekHarnessConfig(
-        provider="deepseek-official",
+        provider=settings.provider,
         model=settings.model,
         reasoning_effort=settings.reasoning_effort,
         max_tokens=settings.max_tokens,
         cwd=str(settings.workspace),
         dsh_home=str(settings.data_dir / "dsh-home"),
         profile=settings.profile,
-        patches=(str(settings.data_dir / "dstui-patch.yml"),),
-        env={"DSH_TELEMETRY_DISABLED": "1", "DSH_AGENTS_HOME": str(settings.data_dir / "agents")},
+        dsh_bin=None if settings.dsh_bin is None else str(settings.dsh_bin),
+        patches=(
+            str(settings.data_dir / "dstui-patch.yml"),
+            *(str(path) for path in settings.extra_patches),
+        ),
+        env={
+            "DSH_TELEMETRY_DISABLED": "1",
+            "DSH_AGENTS_HOME": str(settings.data_dir / "agents"),
+            **env,
+        },
     )
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    ("overrides", "env"),
     [
-        {},
-        {
-            "profile": "sdk-minimal",
-            "model": "deepseek-v4-pro",
-            "reasoning_effort": "low",
-            "max_tokens": 2048,
-            "api_key_set": True,
-        },
+        ({}, {}),
+        (
+            {
+                "profile": "sdk-minimal",
+                "model": "deepseek-v4-pro",
+                "reasoning_effort": "low",
+                "max_tokens": 2048,
+                "api_key_set": True,
+            },
+            {},
+        ),
+        (
+            {
+                "provider": "local",
+                "model": "my-model",
+                "api_key_set": True,
+                "dsh_bin": Path("/opt/dsh/bin/dsh"),
+                "extra_patches": (Path("/etc/dstui/b.yml"), Path("/etc/dstui/a.yml")),  # in order
+            },
+            # hidden, or the sdk profile's web_search sends it (and queries) to DeepSeek
+            {"DEEPSEEK_API_KEY": ""},
+        ),
     ],
-    ids=["defaults", "all-options"],
+    ids=["defaults", "deepseek-options", "other-provider"],
 )
 def test_build_harness_config_returns_exactly_the_specified_fields(
-    overrides: dict[str, Any], settings: Settings
+    overrides: dict[str, Any], env: dict[str, str], settings: Settings
 ) -> None:
     configured = dataclasses.replace(settings, **overrides)
 
     config = build_harness_config(configured)
 
-    assert config == _expected_config(configured)
+    assert config == _expected_config(configured, **env)
     assert config.api_key is None
     assert config.base_url is None
-
-
-def test_build_harness_config_passes_provider_dsh_bin_and_extra_patches(
-    settings: Settings, tmp_path: Path
-) -> None:
-    extra = (tmp_path / "a.yml", tmp_path / "b.yml")
-    configured = dataclasses.replace(
-        settings, provider="router-ollama", model="qwen3:8b",
-        dsh_bin=tmp_path / "dsh", extra_patches=extra,
-    )  # fmt: skip
-
-    config = build_harness_config(configured)
-
-    assert config.provider == "router-ollama"
-    assert config.model == "qwen3:8b"
-    assert config.dsh_bin == str(tmp_path / "dsh")
-    assert config.patches == (str(configured.patch_file), *(str(p) for p in extra))
 
 
 def test_build_harness_config_is_idempotent(settings: Settings) -> None:

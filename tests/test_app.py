@@ -111,7 +111,7 @@ async def test_warns_at_startup_when_api_key_is_missing(tmp_path: Path, api_key_
 
 
 async def test_no_api_key_warning_for_another_provider(tmp_path: Path) -> None:
-    """DEEPSEEK_API_KEY is only read by DeepSeek's own provider."""
+    """dstui hides DEEPSEEK_API_KEY from any other provider, so its absence is no problem."""
     backend = FakeBackend()
     settings = dataclasses.replace(
         make_settings(tmp_path, api_key_set=False), provider="router-ollama", model="qwen3:8b"
@@ -249,9 +249,11 @@ async def test_renders_reasoning_replies_and_tool_calls_in_order(tmp_path: Path)
         assert (second.call_id, second.output, second.is_error) == ("c2", "No such file", True)
 
 
-async def notices_after_one_turn(tmp_path: Path, backend: FakeBackend) -> dict[str, list[str]]:
+async def notices_after_one_turn(
+    tmp_path: Path, backend: FakeBackend, **settings_changes: str
+) -> dict[str, list[str]]:
     """Run one scripted turn to completion; return the notice texts by level."""
-    app = make_app(tmp_path, backend)
+    app = DsTuiApp(backend, dataclasses.replace(make_settings(tmp_path), **settings_changes))
     async with app.run_test(size=SIZE) as pilot:
         await ready_app(pilot, app)
         await submit(pilot, app, "go")
@@ -275,6 +277,17 @@ async def test_turn_error_shows_code_message_and_hint(tmp_path: Path, code: str,
     assert code in text
     assert "upstream said no" in text
     assert hint in text
+
+
+@pytest.mark.parametrize("code", ["MISSING_CREDENTIAL", "AUTH", "QUOTA", "TRANSPORT"])
+async def test_turn_error_has_no_deepseek_hint_with_another_provider(
+    tmp_path: Path, code: str
+) -> None:
+    """The hints are about DeepSeek's API; the runtime's own message names the provider's key."""
+    backend = FakeBackend()
+    backend.script(TurnFinished("error", code, "upstream said no"), outcome=TurnOutcome("error"))
+    shown = await notices_after_one_turn(tmp_path, backend, provider="local", model="my-model")
+    assert shown["error"] == [f"model error {code}: upstream said no"]
 
 
 async def test_turn_error_with_other_code_shows_the_message(tmp_path: Path) -> None:
