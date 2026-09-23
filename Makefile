@@ -11,15 +11,9 @@ RUFF   := $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
 MYPY   := $(if $(wildcard .venv/bin/mypy),.venv/bin/mypy,mypy)
 BANDIT := $(if $(wildcard .venv/bin/bandit),.venv/bin/bandit,bandit)
 
-# Never /tmp: on the development hosts it is a small RAM tmpfs, and a full e2e run leaves
-# ~100k files. Every test run gets a private TMPDIR + pytest --basetemp under this root,
-# removed when pytest exits (pass or fail). Extra pytest arguments: PYTEST_ARGS='-m "not e2e"'.
-TEST_TMP_ROOT ?= /var/tmp
-PYTEST_ARGS   ?=
-define run_pytest
-	@tmp="$$(mktemp -d -p $(TEST_TMP_ROOT) dstui-test.XXXXXX)" && trap 'rm -rf "$$tmp"' EXIT && \
-	TMPDIR="$$tmp" $(PYTEST) tests/ --basetemp="$$tmp/pytest" $(1) $(PYTEST_ARGS)
-endef
+# Extra pytest arguments: make test PYTEST_ARGS='-m "not e2e"'. The suite itself keeps every
+# temp file under /var/tmp and removes it afterwards (tests/tmp_hygiene.py, see CLAUDE.md).
+PYTEST_ARGS ?=
 
 .PHONY: help dev-install lock test test-cov lint lint-fix typecheck security check package release clean
 
@@ -52,11 +46,11 @@ lock: ## Regenerate requirements.txt, requirements-dev.txt and requirements-buil
 
 # --- Testing ---
 
-test: ## Run tests (hermetic; private temp dir under /var/tmp, removed afterwards)
-	$(call run_pytest,)
+test: ## Run tests (hermetic; temp files under /var/tmp, removed afterwards)
+	$(PYTEST) tests/ $(PYTEST_ARGS)
 
 test-cov: ## Run tests with coverage (term-missing; fails below 90 %)
-	$(call run_pytest,--cov=dstui --cov-report=term-missing)
+	$(PYTEST) tests/ --cov=dstui --cov-report=term-missing $(PYTEST_ARGS)
 
 # --- Static checks ---
 
