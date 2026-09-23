@@ -15,6 +15,8 @@ from deepseek_harness import DeepSeekHarnessConfig, Notification
 
 from tests.fake_deepseek import FakeDeepSeek
 
+pytest_plugins = ["tests.tmp_hygiene"]  # temp files under /var/tmp, removed after the run
+
 TRACES_DIR = Path(__file__).parent / "fixtures" / "traces"
 LEAK_GRACE_SECONDS = 3.0
 
