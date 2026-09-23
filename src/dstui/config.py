@@ -17,8 +17,9 @@ MODELS = ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-flash", "deepseek-v4
 EFFORTS = ("off", "low", "high", "max")
 DEFAULT_PROFILE = "sdk"
 DEFAULT_MODEL = "deepseek-v4-flash"
-
-_PROVIDER = "deepseek-official"  # the only provider the runtime's initialize accepts
+# DeepSeek's own API. Any other provider must be declared to the runtime by a
+# --patch file (e.g. an `llm-pi-ai` entry for an OpenAI-compatible endpoint).
+DEFAULT_PROVIDER = "deepseek-official"
 # Runtime patch disabling the per-request session log (JSON is valid YAML).
 _SESSION_LOG_PATCH = '[{"id":"session-log-deepseek","config":{"enabled":false}}]\n'
 
@@ -32,6 +33,14 @@ class Settings:
     reasoning_effort: str | None = None  # None -> runtime default ("high")
     max_tokens: int | None = None  # None -> runtime default
     api_key_set: bool = False  # DEEPSEEK_API_KEY present and non-empty
+    provider: str = DEFAULT_PROVIDER
+    dsh_bin: Path | None = None  # None -> the SDK's bundled runtime
+    extra_patches: tuple[Path, ...] = ()  # applied after dstui's own patch, in order
+
+    @property
+    def needs_deepseek_key(self) -> bool:
+        """Whether this provider reads DEEPSEEK_API_KEY (only DeepSeek's own API does)."""
+        return self.provider == DEFAULT_PROVIDER
 
     @property
     def dsh_home(self) -> Path:
@@ -75,14 +84,26 @@ def parse_args(argv: Sequence[str] | None = None, env: Mapping[str, str] | None 
     argv = sys.argv[1:] if argv is None else argv
     parser = _build_parser(default_data_dir(env))
     args = parser.parse_args(argv)
+    if args.provider == DEFAULT_PROVIDER:
+        model = DEFAULT_MODEL if args.model is None else args.model
+        if model not in MODELS:
+            choices = ", ".join(repr(m) for m in MODELS)
+            parser.error(f"argument -m/--model: invalid choice: {model!r} (choose from {choices})")
+    elif args.model is None:
+        parser.error(f"argument -m/--model: required with --provider {args.provider}")
+    else:
+        model = args.model
     return Settings(
         workspace=args.workspace,
         data_dir=args.data_dir,
         profile=args.profile,
-        model=args.model,
+        model=model,
         reasoning_effort=args.effort,
         max_tokens=args.max_tokens,
         api_key_set=bool(env.get("DEEPSEEK_API_KEY", "").strip()),
+        provider=args.provider,
+        dsh_bin=args.dsh_bin,
+        extra_patches=tuple(args.patch),
     )
 
 
@@ -90,7 +111,9 @@ def _build_parser(default_data: Path) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dstui",
         description="Chat with a DeepSeek Harness agent in the terminal.",
-        epilog="The API key is read from DEEPSEEK_API_KEY (and DEEPSEEK_BASE_URL, if set).",
+        epilog="With the default provider the API key is read from DEEPSEEK_API_KEY (and "
+        "DEEPSEEK_BASE_URL, if set). Another provider is declared by a --patch file, which "
+        "also names where its key comes from.",
     )
     parser.add_argument(
         "-w",
@@ -108,7 +131,19 @@ def _build_parser(default_data: Path) -> argparse.ArgumentParser:
         "sdk-minimal = NO sandbox (default: %(default)s)",
     )
     parser.add_argument(
-        "-m", "--model", choices=MODELS, default=DEFAULT_MODEL, help="model (default: %(default)s)"
+        "--provider",
+        default=DEFAULT_PROVIDER,
+        metavar="ID",
+        help="model provider id; anything but the default must be declared by a --patch file "
+        "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help=f"model; with the default provider one of {', '.join(MODELS)} "
+        f"(default: {DEFAULT_MODEL}); required with any other provider",
     )
     parser.add_argument(
         "--effort", choices=EFFORTS, default=None, help="reasoning effort (default: runtime)"
@@ -126,6 +161,21 @@ def _build_parser(default_data: Path) -> argparse.ArgumentParser:
         default=str(default_data),  # a string default goes through the type check too
         metavar="PATH",
         help="dstui state directory (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--dsh-bin",
+        type=_existing_file,
+        default=None,
+        metavar="PATH",
+        help="run this DeepSeek Harness executable instead of the SDK's bundled runtime",
+    )
+    parser.add_argument(
+        "--patch",
+        type=_existing_file,
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="extra runtime patch file, applied after dstui's own (repeatable)",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     return parser
@@ -161,6 +211,13 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _existing_file(value: str) -> Path:
+    path = _absolute_path(value)
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"{path} is not a file")
+    return path
+
+
 def _existing_dir(value: str) -> Path:
     path = _absolute_path(value)
     if not path.exists():
@@ -176,13 +233,14 @@ def build_harness_config(settings: Settings) -> DeepSeekHarnessConfig:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)  # private when newly created
     settings.patch_file.write_text(_SESSION_LOG_PATCH, encoding="utf-8")
     return DeepSeekHarnessConfig(
-        provider=_PROVIDER,
+        provider=settings.provider,
         model=settings.model,
         reasoning_effort=settings.reasoning_effort,
         max_tokens=settings.max_tokens,
         cwd=str(settings.workspace),
         dsh_home=str(settings.dsh_home),
         profile=settings.profile,
-        patches=(str(settings.patch_file),),
+        dsh_bin=None if settings.dsh_bin is None else str(settings.dsh_bin),
+        patches=(str(settings.patch_file), *(str(p) for p in settings.extra_patches)),
         env={"DSH_TELEMETRY_DISABLED": "1", "DSH_AGENTS_HOME": str(settings.agents_home)},
     )

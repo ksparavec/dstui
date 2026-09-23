@@ -12,7 +12,8 @@ beyond a data directory.
 
 - [uv](https://docs.astral.sh/uv/). It installs Python 3.14 and every dependency.
 - A DeepSeek API key in `DEEPSEEK_API_KEY`. `DEEPSEEK_BASE_URL` is optional and points the
-  agent at a different endpoint.
+  agent at a different endpoint. Not needed with another provider (see
+  [Other providers](#other-providers)).
 - Only Linux x86_64 has been tested. The runtime wheel also exists for Linux arm64, macOS and
   Windows.
 
@@ -39,14 +40,47 @@ key the app still starts: it shows a warning, and each prompt then ends with a
 |---|---|---|
 | `-w`, `--workspace PATH` | current directory | The agent's working directory. It must exist. With `sdk` the agent can write only inside it. |
 | `--profile {sdk,sdk-minimal}` | `sdk` | The agent profile (see below). `sdk-minimal` has no sandbox. |
-| `-m`, `--model MODEL` | `deepseek-v4-flash` | `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-flash` or `deepseek-v4-flash-vision-exp`. |
+| `--provider ID` | `deepseek-official` | The model provider. Any other provider must be declared by a `--patch` file. |
+| `-m`, `--model MODEL` | `deepseek-v4-flash` | With `deepseek-official`: `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-flash` or `deepseek-v4-flash-vision-exp`. With any other provider: that provider's model id, required. |
 | `--effort {off,low,high,max}` | runtime default (`high`) | Reasoning effort. |
 | `--max-tokens N` | runtime default | The maximum number of output tokens per model request. |
 | `--data-dir PATH` | see [Data](#data) | Where dstui keeps its state. |
+| `--dsh-bin PATH` | the SDK's bundled runtime | Run this DeepSeek Harness executable instead, e.g. an npm-installed `dsh`. |
+| `--patch PATH` | none | An extra runtime patch file, applied after dstui's own. Repeatable; applied in order. |
 | `--version`, `-h` / `--help` | | Print the version or the help text. |
 
 A leading `~` in `--workspace` and `--data-dir` is expanded, also in the `--opt=~/path` form
 that the shell leaves alone.
+
+## Other providers
+
+The runtime is not tied to DeepSeek's API. A patch file can declare any provider its
+`llm-pi-ai` entry supports, such as an OpenAI-compatible server, and `--provider` / `--model`
+then select it:
+
+```yaml
+# local.yml
+- id: llm-pi-ai
+  config:
+    providers:
+      local:
+        api: openai-completions
+        baseURL: http://localhost:8000/v1
+        apiKeyEnv: LOCAL_API_KEY       # any non-empty value if the server ignores keys
+        models:
+          - id: my-model
+            contextWindow: 131072
+```
+
+```sh
+export LOCAL_API_KEY=local
+uv run dstui -w ~/src/project --patch local.yml --provider local -m my-model
+```
+
+A patch entry replaces that entry's whole configuration, so a patch that declares
+`llm-pi-ai` replaces every provider declared before it. `DEEPSEEK_API_KEY` is not read, and
+no warning about it is shown. `--dsh-bin` runs another DeepSeek Harness executable than the
+SDK's bundled one, for example an installation that already carries your configuration.
 
 ## Keys
 
