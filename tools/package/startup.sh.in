@@ -1,0 +1,99 @@
+# dstui makeself startup script (body; prepended at build time with
+# #!/bin/sh + DSTUI_VERSION= + PYVER=).
+#
+# makeself (built with --nox11 --nocomp) extracts this dir to a temp location and
+# runs this script from there. The dir contains:
+#   ./zstd            a bundled STATIC zstd (so the target needs no zstd)
+#   ./bundle.tar.zst  the zstd-compressed CPython + dstui + deps tree
+#
+# We decompress with the bundled zstd, then lay the tree into an install prefix
+# and expose `dstui`. Install prefix resolution (highest first):
+#   1. `--target DIR`  (pass as: sh dstui-install.sh -- --target DIR)
+#   2. $DSTUI_PREFIX
+#   3. $HOME/.local
+#
+# DeepSeek Harness (`dsh`, npm @deepseek-ai/dsh) is NOT in the bundle: it is a
+# separate install, and dstui finds it on PATH (or via --dsh-bin).
+set -eu
+
+PREFIX="${DSTUI_PREFIX:-$HOME/.local}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) PREFIX="$2"; shift 2 ;;
+    --target=*) PREFIX="${1#*=}"; shift ;;
+    -h|--help)
+      echo "dstui ${DSTUI_VERSION} installer"
+      echo "Usage: sh dstui-install.sh [-- --target DIR]   (or set DSTUI_PREFIX)"
+      exit 0 ;;
+    *) shift ;;
+  esac
+done
+
+here="$(pwd)"                       # makeself extraction dir (zstd + bundle.tar.zst)
+chmod +x "$here/zstd" 2>/dev/null || true
+
+mkdir -p "$PREFIX"
+PREFIX="$(CDPATH= cd -- "$PREFIX" && pwd)"
+LIB="$PREFIX/lib/dstui"
+BINDIR="$PREFIX/bin"
+DOCDIR="$PREFIX/share/doc/dstui"
+
+# The bundled interpreter every console script resolves to. `-s` makes the bundle
+# hermetic (ignores the host user site). A shebang over the kernel's 127-byte
+# limit can't be exec'd, so fail fast on an over-long prefix — before anything
+# is unpacked or replaced.
+BUNDLE_PY="$LIB/bin/python$PYVER"
+shebang="#!$BUNDLE_PY -s"
+if [ ${#shebang} -gt 127 ]; then
+  echo "error: install path too long — shebang '$shebang' is ${#shebang} bytes" >&2
+  echo "       (kernel limit 127). Re-run with a shorter DSTUI_PREFIX/--target." >&2
+  exit 1
+fi
+
+echo "Installing dstui ${DSTUI_VERSION} -> $PREFIX"
+
+# Decompress the heavy payload with the BUNDLED static zstd (target needs none).
+# Stage on the SAME filesystem as the target for a fast rename.
+stage="$PREFIX/.dstui-install.$$"
+rm -rf "$stage"; mkdir -p "$stage"
+trap 'rm -rf "$stage"' EXIT INT TERM
+"$here/zstd" -dc "$here/bundle.tar.zst" | tar -xf - -C "$stage"   # -> stage/python, stage/doc
+
+mkdir -p "$BINDIR" "$PREFIX/lib" "$PREFIX/share/doc"
+rm -rf "$LIB"; mv "$stage/python" "$LIB"
+if [ -d "$stage/doc" ]; then rm -rf "$DOCDIR"; mv "$stage/doc" "$DOCDIR"; fi
+
+# Repoint console-script shebangs (pip stamped a build-time path) at the bundled
+# interpreter on THIS machine. grep -I skips the interpreter binary.
+for f in "$LIB"/bin/*; do
+  [ -f "$f" ] || continue
+  grep -Iqm1 '^#!.*python' "$f" 2>/dev/null || continue
+  tmp="$f.dstui-fix.$$"
+  { printf '%s\n' "$shebang"; tail -n +2 "$f"; } > "$tmp"
+  chmod 755 "$tmp"; mv "$tmp" "$f"
+done
+
+# Only `dstui` goes on PATH. The bundled interpreter deliberately does NOT:
+# $BINDIR is normally ~/.local/bin, which sits ahead of /usr/bin for most users,
+# so linking it there as python$PYVER would shadow the host's own python$PYVER
+# for every command in the shell — with an interpreter that is sourceless,
+# carries dstui's site-packages, and has had pip/setuptools stripped. Console
+# scripts do not need the link: their shebangs were rewritten above to
+# $BUNDLE_PY as an absolute path.
+ln -sf "$LIB/bin/dstui" "$BINDIR/dstui"
+
+echo "Installed:"
+echo "  $BINDIR/dstui      ->  $LIB/bin/dstui  (Python console script)"
+echo "  $LIB/  (CPython $PYVER + dstui + deps, sourceless precompiled)"
+echo ""
+echo "dstui needs DeepSeek Harness (dsh), which is installed separately:"
+echo "  npm install -g @deepseek-ai/dsh     (Node.js >= 22.19)"
+if command -v dsh >/dev/null 2>&1; then
+  echo "  found: $(command -v dsh)"
+else
+  echo "  not found on PATH yet (or run dstui --dsh-bin PATH)"
+fi
+case ":${PATH}:" in
+  *":$BINDIR:"*) echo "Run: dstui --help" ;;
+  *) echo "Add $BINDIR to PATH:  export PATH=\"$BINDIR:\$PATH\"" ;;
+esac

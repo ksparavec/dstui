@@ -8,6 +8,34 @@ blocks. The status bar shows what the agent is doing, the model and profile, and
 totals. dstui drives a DeepSeek Harness runtime process (`dsh`), which you install separately.
 It has no server or state of its own beyond a data directory.
 
+> Status: early, pre-release. See `CHANGELOG.md`.
+
+## Quick Start
+
+> **Requires DeepSeek Harness, installed separately:** `npm install -g @deepseek-ai/dsh`
+> (Node.js >= 22.19). dstui does not bundle it.
+
+Linux x86_64 only. No Python or other dependencies needed: the installer ships its own.
+
+```bash
+curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | sh
+```
+
+Installs to `~/.local` by default. Override the prefix, or pin a version, via env:
+
+```bash
+curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | DSTUI_PREFIX=/usr/local sh
+curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | DSTUI_VERSION=v0.1.0 sh
+```
+
+Then:
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+dstui -w ~/src/project     # the agent works in ~/src/project
+dstui -w ~/src/project -m deepseek-v4-pro --effort max
+```
+
 ## Requirements
 
 - **DeepSeek Harness, installed separately:** `npm install -g @deepseek-ai/dsh` (needs
@@ -15,25 +43,28 @@ It has no server or state of its own beyond a data directory.
   executable, else `dsh` from `PATH`, else the SDK's embedded runtime if that is installed
   (only development and test installs have it). Without any of them dstui exits with
   `DeepSeek Harness (dsh) not found`.
-- [uv](https://docs.astral.sh/uv/). It installs Python 3.14 and every dependency.
 - A DeepSeek API key in `DEEPSEEK_API_KEY`. `DEEPSEEK_BASE_URL` is optional and points the
   agent at a different endpoint. Not used with another provider (see
   [Other providers](#other-providers)).
-- Only Linux x86_64 has been tested.
+- Linux x86_64. It is the only platform tested, and the only one the installer supports.
 
 The SDK comes from PyPI, following the official DeepSeek Harness install instructions
 (`pip install deepseek-harness-sdk`). dstui pins `deepseek-harness-sdk==0.1.5rc1`, the latest
 published release. That package depends on `deepseek-harness-runtime-bin`, a 275 MB wheel with
-an embedded runtime. dstui uses it only for its own tests and never ships it.
+an embedded runtime. The installer leaves it out (it installs the SDK with `--no-deps`); dstui
+itself uses it only for its tests. A plain `pip install` of dstui still pulls it in through the
+SDK.
 
-## Install and run
+## Install from source
+
+With [uv](https://docs.astral.sh/uv/), which also installs Python 3.14:
 
 ```sh
-uv sync
-export DEEPSEEK_API_KEY=sk-...
-uv run dstui -w ~/src/project     # the agent works in ~/src/project
-uv run dstui -w ~/src/project -m deepseek-v4-pro --effort max
+make dev-install                  # .venv with dstui (editable) and the development tools
+.venv/bin/dstui -w ~/src/project
 ```
+
+## Usage
 
 Without `-w` the agent works in the current directory. Point it at a project directory, not at
 your home directory (see [Profiles](#profiles)). `python -m dstui` also works. Without an API
@@ -78,7 +109,7 @@ then select it. For the default `sdk` profile:
 
 ```sh
 export LOCAL_API_KEY=local
-uv run dstui -w ~/src/project --patch local.yml --provider local -m my-model
+dstui -w ~/src/project --patch local.yml --provider local -m my-model
 ```
 
 `sdk-minimal` has no `llm-pi-ai` entry, so there `local.yml` changes nothing and the agent
@@ -176,19 +207,37 @@ reset it). Session logs and `dstui.log` are never pruned.
 
 ## Development
 
-The tests never contact api.deepseek.com and need no API key. The `e2e` tests start the real
-bundled runtime and point it at a local fake DeepSeek API (`tests/fake_deepseek.py`). One of
-them runs `python -m dstui` in a pseudo-terminal and types into it (`tests/test_pty.py`). A
-test that leaves a runtime process running fails.
+```sh
+make dev-install                        # .venv: dstui editable + the [dev] extra
+make check                              # ruff (lint + format) and mypy --strict
+make test                               # everything
+make test PYTEST_ARGS='-m "not e2e"'    # unit and UI tests only (fast, no runtime)
+make test PYTEST_ARGS='-m e2e'          # bridge and full-app tests on the real runtime
+make test-cov                           # coverage; fails below 90 %
+make lock                               # re-pin requirements*.txt after a dependency change
+make help                               # every target
+```
+
+The tests never contact api.deepseek.com and need no API key. The `e2e` tests start a real
+runtime and point it at a local fake DeepSeek API (`tests/fake_deepseek.py`). With no
+separately installed `dsh` they use the SDK's embedded runtime, which only the `[dev]` extra
+installs (`deepseek-harness-runtime-bin`). One of them runs `python -m dstui` in a
+pseudo-terminal and types into it (`tests/test_pty.py`). A test that leaves a runtime process
+running fails.
+
+**Never `/tmp`.** `make test` and `make test-cov` give pytest a private `TMPDIR` and
+`--basetemp` under `/var/tmp` and delete both afterwards, pass or fail: a full run leaves about
+100k files, and the runtime leaves its own scratch directories in `$TMPDIR`. Running pytest
+directly, do the same:
 
 ```sh
-uv run pytest                                  # everything
-uv run pytest -m "not e2e"                     # unit and UI tests only (fast, no runtime)
-uv run pytest -m e2e                           # bridge and full-app tests on the real runtime
-uv run pytest --cov --cov-report=term-missing  # coverage; fails below 90 %
-uv run ruff check src tests
-uv run ruff format --check src tests
+export TMPDIR=/var/tmp/dstui-$USER-tmp && mkdir -p "$TMPDIR"
+uv run pytest --basetemp=/var/tmp/dstui-$USER-pytest -m "not e2e"
+rm -rf /var/tmp/dstui-$USER-pytest "$TMPDIR"
 ```
+
+`requirements.txt` and `requirements-dev.txt` (from `make lock`) are the locks. `uv run` works in
+the `.venv` as it is, without a `uv.lock`.
 
 Code layout (`src/dstui/`):
 
@@ -199,3 +248,44 @@ Code layout (`src/dstui/`):
 | `bridge.py` | Owns the runtime and the session. Every call blocks, so it runs on worker threads. |
 | `widgets.py`, `app.py` | The Textual UI. |
 | `__init__.py` | `main()`, the `dstui` entry point. |
+
+## Packaging
+
+`make package` produces `dist/dstui-install.sh`, a single **makeself** self-extracting,
+run-once installer (**linux-x86_64**, ~31 MB). It carries a relocatable CPython 3.14 with dstui
+and every dependency, **sourceless-precompiled** (`.pyc` only). The tree is **zstd -19**
+compressed and unpacked at install time by a **bundled static zstd**, so the target host needs
+neither Python nor zstd. makeself adds a **SHA256** integrity check, and the `-s` launcher
+keeps it hermetic (ignores the host user site). Only `dstui` goes on `PATH`.
+
+**It does not contain DeepSeek Harness.** `requirements.txt` leaves out
+`deepseek-harness-runtime-bin`, the dependencies install hash-checked with `--no-deps`, and
+`tools/package/check-no-runtime.sh` fails the build if the runtime, a `dsh`, or anything Node
+is in the bundle.
+
+```bash
+./dstui-install.sh                           # -> ~/.local
+DSTUI_PREFIX=/usr/local ./dstui-install.sh   # system install
+sh ./dstui-install.sh --check                # verify integrity only
+dstui --help
+```
+
+Build deps: `uv`, `makeself`, `curl`, and a C toolchain (to build the static zstd once; it is
+cached under `.cache/`). Run `make lock` and `make dev-install` first. All temporary files go to
+a private directory under `/var/tmp`. The build then installs the result into a temporary
+prefix and checks it: every module's version against `requirements.txt`, no runtime or Node
+files, only `dstui` in `bin/`, `--help`, `--version`, a clear exit 1 without any `dsh`, and one
+real agent turn against the fake API through `--dsh-bin`, with the `[dev]` extra's embedded
+runtime standing in for a separately installed `dsh` (it is not copied into the bundle).
+
+## Releasing
+
+Maintainers cut a release with `make release`. It reads the version from `pyproject.toml`,
+promotes the `CHANGELOG.md` `[Unreleased]` section to that version, rebuilds the installer, tags
+`vX.Y.Z`, pushes, and publishes a GitHub release with two assets: the `dstui-install.sh` bundle
+and the `install.sh` bootstrap behind the one-liner in the [Quick Start](#quick-start).
+
+Before releasing: bump `version` in `pyproject.toml`, add entries under `## [Unreleased]` (an
+empty section is refused), and run `make lock` if dependencies changed. Pre-flight guards
+require a clean tree on `main`, in sync with `origin`, with the tag and release not yet present.
+For CI or other non-interactive runs, set `DSTUI_RELEASE_ASSUME_YES=1` to skip the prompt.

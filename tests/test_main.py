@@ -293,7 +293,7 @@ def test_python_m_dstui_prints_the_version(tmp_path: Path) -> None:
 
 
 def test_console_script_prints_help(tmp_path: Path) -> None:
-    assert CONSOLE_SCRIPT.is_file(), "run `uv sync` to install the dstui console script"
+    assert CONSOLE_SCRIPT.is_file(), "run `make dev-install` to install the dstui console script"
 
     result = run_cli([str(CONSOLE_SCRIPT), "--help"], cli_env(tmp_path), tmp_path)
 

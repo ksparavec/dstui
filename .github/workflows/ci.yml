@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    name: lint + types + bandit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+          cache: pip
+
+      - name: Install package (dev)
+        run: python -m pip install -e ".[dev]"
+
+      - name: ruff
+        run: |
+          ruff check src/ tests/
+          ruff format --check src/ tests/
+
+      - name: mypy --strict
+        run: mypy src/
+
+      - name: bandit
+        run: bandit -r src/ -c pyproject.toml
+
+  test:
+    name: tests + coverage + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+          cache: pip
+
+      # The e2e tests run the real runtime, whose default "sdk" profile sandboxes the agent's
+      # tools with bubblewrap. bwrap needs unprivileged user namespaces, which Ubuntu 24.04
+      # runners restrict through AppArmor (kernel.apparmor_restrict_unprivileged_userns=1):
+      # bwrap then fails with "setting up uid map: Permission denied". Lift the restriction on
+      # this throwaway VM only.
+      - name: Allow the bubblewrap sandbox (unprivileged user namespaces)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # The [dev] extra brings the test-only embedded runtime (deepseek-harness-runtime-bin):
+      # no separately installed dsh exists on the runner.
+      - name: Install package (dev)
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run tests under coverage
+        run: pytest tests/ --cov=dstui --cov-branch --cov-report=term-missing -p no:cacheprovider
+
+      - name: Build wheel + sdist
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Gate — the app is shipped in the wheel
+        run: |
+          count=$(unzip -l dist/*.whl | grep -c 'dstui/app.py' || true)
+          echo "dstui/app.py entries in wheel: $count"
+          test "$count" -eq 1 || (echo "dstui/app.py missing from wheel" && exit 1)
+
+      # What the installer does: the locked deps hash-checked with --no-deps (so without the
+      # SDK's embedded runtime), then the wheel. dstui must import and run without it, and
+      # with no dsh anywhere exit 1 with the not-found message.
+      - name: Gate — the wheel works without the embedded runtime
+        run: |
+          gate="$RUNNER_TEMP/gate"
+          python -m venv "$gate"
+          "$gate/bin/pip" install -q --no-deps --require-hashes -r requirements.txt
+          "$gate/bin/pip" install -q --no-deps dist/*.whl
+          "$gate/bin/python" -c 'import importlib.util as u, dstui, dstui.app; assert u.find_spec("deepseek_harness_runtime") is None'
+          "$gate/bin/dstui" --version
+          mkdir -p "$RUNNER_TEMP/no-dsh-bin" "$RUNNER_TEMP/no-dsh-home"
+          rc=0
+          env -i HOME="$RUNNER_TEMP/no-dsh-home" PATH="$RUNNER_TEMP/no-dsh-bin" \
+            "$gate/bin/dstui" -w . 2> "$RUNNER_TEMP/no-dsh.err" || rc=$?
+          cat "$RUNNER_TEMP/no-dsh.err"
+          test "$rc" -eq 1
+          grep -q 'DeepSeek Harness (dsh) not found' "$RUNNER_TEMP/no-dsh.err"
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*

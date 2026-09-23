@@ -1,0 +1,40 @@
+name: Dependency audit
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # daily, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    name: pip-audit (CVE scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+          cache: pip
+
+      - name: Install pip-audit
+        run: python -m pip install pip-audit
+
+      # Audit the LOCK FILES rather than an installed environment: requirements.txt is
+      # literally the dependency set the installer bundles, and requirements-dev.txt adds
+      # the development tools and the test-only embedded runtime.
+      #
+      # --disable-pip: audit the pins exactly as locked (both files are complete, fully
+      # hashed resolutions from `make lock`) instead of re-resolving them with pip. A pip
+      # resolution of requirements.txt cannot work by design: it would pull in the SDK's
+      # declared deepseek-harness-runtime-bin, which the lock deliberately omits, and fail
+      # with "Hashes are required in --require-hashes mode".
+      - name: pip-audit (runtime lock)
+        run: pip-audit --strict --desc --disable-pip -r requirements.txt
+
+      - name: pip-audit (dev lock)
+        run: pip-audit --strict --desc --disable-pip -r requirements-dev.txt
