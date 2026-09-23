@@ -4,6 +4,12 @@ on:
   schedule:
     - cron: "0 6 * * *"  # daily, 06:00 UTC
   workflow_dispatch:
+  # ...and whenever a lock changes, so a pin with a known advisory fails before it merges.
+  pull_request:
+    paths: ["requirements*.txt", "pyproject.toml"]
+  push:
+    branches: [main]
+    paths: ["requirements*.txt", "pyproject.toml"]
 
 permissions:
   contents: read
@@ -13,10 +19,12 @@ jobs:
     name: pip-audit (CVE scan)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false  # no later step needs the token in .git/config
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version-file: .python-version
           cache: pip
@@ -26,9 +34,10 @@ jobs:
 
       # Audit the LOCK FILES rather than an installed environment: requirements.txt is
       # literally the dependency set the installer bundles, and requirements-dev.txt adds
-      # the development tools and the test-only embedded runtime.
+      # the development tools and the test-only embedded runtime; requirements-build.txt is
+      # the build backend that builds the shipped wheel.
       #
-      # --disable-pip: audit the pins exactly as locked (both files are complete, fully
+      # --disable-pip: audit the pins exactly as locked (all three are complete, fully
       # hashed resolutions from `make lock`) instead of re-resolving them with pip. A pip
       # resolution of requirements.txt cannot work by design: it would pull in the SDK's
       # declared deepseek-harness-runtime-bin, which the lock deliberately omits, and fail
@@ -38,3 +47,6 @@ jobs:
 
       - name: pip-audit (dev lock)
         run: pip-audit --strict --desc --disable-pip -r requirements-dev.txt
+
+      - name: pip-audit (build-backend lock)
+        run: pip-audit --strict --desc --disable-pip -r requirements-build.txt

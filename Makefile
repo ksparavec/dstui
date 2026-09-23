@@ -21,7 +21,7 @@ define run_pytest
 	TMPDIR="$$tmp" $(PYTEST) tests/ --basetemp="$$tmp/pytest" $(1) $(PYTEST_ARGS)
 endef
 
-.PHONY: help dev-install lock test test-cov lint lint-fix typecheck check package release clean
+.PHONY: help dev-install lock test test-cov lint lint-fix typecheck security check package release clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -29,19 +29,26 @@ help: ## Show this help
 
 # --- Setup ---
 
-dev-install: ## Set up .venv with dstui + dev dependencies (editable; incl. the test-only runtime)
+# Exactly the hash-checked versions of requirements-dev.txt (the tests run on what ships), then
+# dstui itself, editable, built by the hash-pinned backend of requirements-build.txt.
+dev-install: ## Set up .venv with dstui + dev dependencies from the locks (editable; incl. the test-only runtime)
 	uv venv --python $(PYTHON_VERSION) .venv 2>/dev/null || true
-	uv pip install --python .venv/bin/python -e ".[dev]"
+	uv pip sync --python .venv/bin/python --require-hashes requirements-dev.txt
+	uv pip install --python .venv/bin/python --no-deps --build-constraints requirements-build.txt -e .
 
 # --python-version pins the resolution to .python-version instead of whatever
 # interpreter happens to be active.
 # requirements.txt is exactly what the installer bundles, so it must never carry the SDK's
 # embedded runtime (the SDK is installed --no-deps; dsh is a separate install).
-# requirements-dev.txt keeps it: the e2e tests run on it.
-lock: ## Regenerate requirements.txt and requirements-dev.txt from pyproject.toml
+# requirements-dev.txt keeps it: `make dev-install` and CI install it for the e2e tests.
+# requirements-build.txt pins the build backend (pyproject [build-system]) that builds the
+# shipped wheel.
+lock: ## Regenerate requirements.txt, requirements-dev.txt and requirements-build.txt from pyproject.toml
 	uv pip compile pyproject.toml --python-version $(PYTHON_VERSION) --generate-hashes \
 		--no-emit-package deepseek-harness-runtime-bin -o requirements.txt
 	uv pip compile pyproject.toml --python-version $(PYTHON_VERSION) --extra dev --generate-hashes -o requirements-dev.txt
+	$(PYTHON) -c 'import tomllib; print(*tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"], sep="\n")' | \
+		uv pip compile - --python-version $(PYTHON_VERSION) --generate-hashes -o requirements-build.txt
 
 # --- Testing ---
 
@@ -64,7 +71,10 @@ lint-fix: ## Run ruff with auto-fix + format
 typecheck: ## Run mypy (strict)
 	$(MYPY) src/
 
-check: lint typecheck ## Static checks: ruff + mypy
+security: ## Run bandit
+	$(BANDIT) -r src/ -c pyproject.toml
+
+check: lint typecheck security ## Static checks: ruff + mypy + bandit (what the CI lint job runs)
 
 # --- Packaging ---
 

@@ -23,16 +23,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is hidden from the runtime, so the `sdk` profile's `web_search` cannot send it
   (or your queries) to DeepSeek.
 - **Runs your DeepSeek Harness:** dstui launches `--dsh-bin PATH`, else `dsh`
-  from `PATH`, and exits with `DeepSeek Harness (dsh) not found` when there is
-  neither. DeepSeek Harness is not part of dstui: install it separately with
-  `npm install -g @deepseek-ai/dsh` (Node.js >= 22.19).
+  from `PATH` (empty and relative `PATH` entries are skipped), else the SDK's
+  embedded runtime when that is installed, which is the case for development
+  installs and for `pip install dstui`. The installer carries no runtime, so an
+  installed dstui exits with `DeepSeek Harness (dsh) not found` unless it gets
+  `--dsh-bin` or finds `dsh` on `PATH`. DeepSeek Harness is not part of dstui:
+  install it separately with `npm install -g @deepseek-ai/dsh` (Node.js >= 22.19).
 - **Private state:** everything lives in one data directory (`$DSTUI_HOME`,
   `$XDG_DATA_HOME/dstui` or `~/.local/share/dstui`) created with mode `0700`.
   Session-log upload to the model API and runtime telemetry are turned off;
   warnings and errors go to `dstui.log` there.
-- **Self-contained installer** for Linux x86_64: one download that brings its
-  own Python, so the host needs none. Install with
+- **Self-contained installer** for Linux x86_64 (glibc): one download that
+  brings its own Python, so the host needs none. Install with
   `curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | sh`
-  (`DSTUI_PREFIX` picks the prefix, default `~/.local`; `DSTUI_VERSION` pins a
-  release). It does not include DeepSeek Harness.
+  (`DSTUI_PREFIX` picks the prefix, default `~/.local`, also for a system-wide
+  install with `sudo`; `DSTUI_VERSION` pins a release). The installed files
+  belong to whoever installs and are readable by every user, and the bundled
+  Python ignores `PYTHONPATH` and `PYTHONHOME`. It does not include DeepSeek
+  Harness.
 

@@ -18,6 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from deepseek_harness_runtime import bundled_runtime_path
 
 from tests.fake_deepseek import FakeDeepSeek, conversation, text_reply
 
@@ -130,9 +131,17 @@ def test_dstui_in_a_real_terminal_sends_a_multiline_prompt_and_quits_cleanly(
         "DSTUI_HOME": str(tmp_path / "data"),  # the runtime's DSH_HOME, seen by the leak check
         "TERM": "xterm-256color",
     }
-    process, master = spawn_dstui(
-        ["-w", str(workspace), "--profile", "sdk-minimal"], env, workspace
-    )
+    # --dsh-bin: always the pinned test-only runtime, never whatever `dsh` the host has on PATH
+    # (npm @deepseek-ai/dsh, the dev venv's wrapper script, or Debian's unrelated dsh).
+    args = [
+        "-w",
+        str(workspace),
+        "--profile",
+        "sdk-minimal",
+        "--dsh-bin",
+        str(bundled_runtime_path()),
+    ]
+    process, master = spawn_dstui(args, env, workspace)
     terminal = Terminal(master, deadline=time.monotonic() + TOTAL_S)
     try:
         terminal.wait_until(lambda: "ready" in terminal.text, "the ready status")

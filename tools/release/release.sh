@@ -11,7 +11,8 @@
 # tools/package/build-binary.sh). Release the *current* version; bump the version
 # and fill in CHANGELOG entries before running this.
 #
-# Guards (all must pass before anything mutates): on `main`, clean working tree,
+# Guards (all must pass before anything mutates): on `main`, clean working tree
+# (untracked files and assume-unchanged / skip-worktree entries included),
 # local == origin/main, and neither the tag nor the GitHub release exists yet.
 #
 # Non-interactive use (CI): set DSTUI_RELEASE_ASSUME_YES=1 to skip the prompt.
@@ -61,8 +62,19 @@ CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [ "$CURRENT_BRANCH" = "$BRANCH" ] \
     || { echo "ERROR: not on '$BRANCH' (currently on '$CURRENT_BRANCH')" >&2; exit 1; }
 
-[ -z "$(git status --porcelain)" ] \
+# --untracked-files=all overrides a status.showUntrackedFiles=no config: the wheel would
+# pick up an untracked module under src/ that is not in the tagged commit.
+[ -z "$(git status --porcelain --untracked-files=all)" ] \
     || { echo "ERROR: working tree is not clean; commit or stash first" >&2; exit 1; }
+# git status cannot see edits to files marked assume-unchanged (lower-case tag in
+# `git ls-files -v`) or skip-worktree (S).
+HIDDEN="$(git ls-files -v | grep -E '^([a-z]|S) ' || true)"
+[ -z "$HIDDEN" ] || {
+    echo "ERROR: files hidden from git status (assume-unchanged / skip-worktree):" >&2
+    printf '%s\n' "$HIDDEN" | cut -c3- | sed 's/^/  /' >&2
+    echo "       clear with: git update-index --no-assume-unchanged --no-skip-worktree FILE" >&2
+    exit 1
+}
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
     echo "ERROR: tag $TAG already exists locally" >&2; exit 1
