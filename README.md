@@ -12,7 +12,7 @@ beyond a data directory.
 
 - [uv](https://docs.astral.sh/uv/). It installs Python 3.14 and every dependency.
 - A DeepSeek API key in `DEEPSEEK_API_KEY`. `DEEPSEEK_BASE_URL` is optional and points the
-  agent at a different endpoint. Not needed with another provider (see
+  agent at a different endpoint. Not used with another provider (see
   [Other providers](#other-providers)).
 - Only Linux x86_64 has been tested. The runtime wheel also exists for Linux arm64, macOS and
   Windows.
@@ -49,14 +49,14 @@ key the app still starts: it shows a warning, and each prompt then ends with a
 | `--patch PATH` | none | An extra runtime patch file, applied after dstui's own. Repeatable; applied in order. |
 | `--version`, `-h` / `--help` | | Print the version or the help text. |
 
-A leading `~` in `--workspace` and `--data-dir` is expanded, also in the `--opt=~/path` form
-that the shell leaves alone.
+A leading `~` in `--workspace`, `--data-dir`, `--dsh-bin` and `--patch` is expanded, also in
+the `--opt=~/path` form that the shell leaves alone.
 
 ## Other providers
 
 The runtime is not tied to DeepSeek's API. A patch file can declare any provider its
 `llm-pi-ai` entry supports, such as an OpenAI-compatible server, and `--provider` / `--model`
-then select it:
+then select it. For the default `sdk` profile:
 
 ```yaml
 # local.yml
@@ -77,10 +77,38 @@ export LOCAL_API_KEY=local
 uv run dstui -w ~/src/project --patch local.yml --provider local -m my-model
 ```
 
+`sdk-minimal` has no `llm-pi-ai` entry, so there `local.yml` changes nothing and the agent
+fails to start with `no adapter registered for provider "local"`. For that profile insert the
+entry instead, and pass `--profile sdk-minimal --patch local-minimal.yml`. This form fails on
+`sdk`, which already has the entry (`duplicate loader entry id`).
+
+```yaml
+# local-minimal.yml
+- insert:
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          local:
+            api: openai-completions
+            baseURL: http://localhost:8000/v1
+            apiKeyEnv: LOCAL_API_KEY
+            models:
+              - id: my-model
+                contextWindow: 131072
+```
+
 A patch entry replaces that entry's whole configuration, so a patch that declares
-`llm-pi-ai` replaces every provider declared before it. `DEEPSEEK_API_KEY` is not read, and
-no warning about it is shown. `--dsh-bin` runs another DeepSeek Harness executable than the
-SDK's bundled one, for example an installation that already carries your configuration.
+`llm-pi-ai` replaces every provider declared before it.
+
+With another provider dstui shows no warning about `DEEPSEEK_API_KEY` and hides that key from
+the runtime, so `apiKeyEnv` must name another variable. The `sdk` profile's `web_search` tool
+calls DeepSeek's search API with that key, so it then fails with `no API key` instead of
+sending your queries to DeepSeek.
+
+`--dsh-bin` runs another DeepSeek Harness executable than the SDK's bundled one, for example a
+different `dsh` version. dstui still runs it with `DSH_HOME` set to `<data dir>/dsh-home`, so
+configuration kept in `~/.dsh` is not read: declare providers with `--patch`.
 
 ## Keys
 

@@ -44,7 +44,7 @@ API_KEY_MISSING = "DEEPSEEK_API_KEY is not set: export it and restart dstui to c
 TRUNCATED = "reply truncated: the model reached its max-tokens limit"
 INTERRUPTED = "interrupted: the turn ended before the tool finished"
 MODEL_OUTPUT = (events.Reasoning, events.AssistantText, events.ToolCallStarted)
-ERROR_HINTS = {
+ERROR_HINTS = {  # about DeepSeek's own API (the default provider)
     "MISSING_CREDENTIAL": "set DEEPSEEK_API_KEY and restart dstui",
     "AUTH": "the API key was rejected",
     "QUOTA": "insufficient balance: top up your DeepSeek account",
@@ -56,11 +56,11 @@ def describe(error: BaseException) -> str:
     return str(error) or type(error).__name__
 
 
-def describe_turn_error(code: str | None, message: str | None) -> str:
-    """``model error CODE: message``, plus a friendly hint for the well-known codes."""
+def describe_turn_error(code: str | None, message: str | None, *, deepseek: bool = True) -> str:
+    """``model error CODE: message``, plus a friendly hint for the well-known DeepSeek codes."""
     code = code or "UNKNOWN"
     text = f"model error {code}: {message or 'no details'}"
-    hint = ERROR_HINTS.get(code)
+    hint = ERROR_HINTS.get(code) if deepseek else None
     return f"{text} ({hint})" if hint else text
 
 
@@ -212,7 +212,8 @@ class DsTuiApp(App[None]):
             case events.Retrying(attempt=attempt, max_retries=max_retries, code=code):
                 self._show_turn_phase(f"retrying {attempt}/{max_retries} ({code})…")
             case events.TurnFinished(kind="error", code=code, message=text):
-                await self._notice(describe_turn_error(code, text), "error")
+                deepseek = self.settings.needs_deepseek_key
+                await self._notice(describe_turn_error(code, text, deepseek=deepseek), "error")
             case events.TurnFinished(kind="max-tokens"):
                 await self._notice(TRUNCATED, "warning")
             case events.TitleChanged(title=title):

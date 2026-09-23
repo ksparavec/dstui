@@ -39,7 +39,7 @@ class Settings:
 
     @property
     def needs_deepseek_key(self) -> bool:
-        """Whether this provider reads DEEPSEEK_API_KEY (only DeepSeek's own API does)."""
+        """Whether this is DeepSeek's API; dstui hides DEEPSEEK_API_KEY from any other provider."""
         return self.provider == DEFAULT_PROVIDER
 
     @property
@@ -130,6 +130,13 @@ def _build_parser(default_data: Path) -> argparse.ArgumentParser:
         help="agent profile: sdk = file writes sandboxed to the workspace, "
         "sdk-minimal = NO sandbox (default: %(default)s)",
     )
+    _add_model_options(parser)
+    _add_runtime_options(parser, default_data)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
+    return parser
+
+
+def _add_model_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--provider",
         default=DEFAULT_PROVIDER,
@@ -155,6 +162,9 @@ def _build_parser(default_data: Path) -> argparse.ArgumentParser:
         metavar="N",
         help="maximum output tokens per model request (default: runtime)",
     )
+
+
+def _add_runtime_options(parser: argparse.ArgumentParser, default_data: Path) -> None:
     parser.add_argument(
         "--data-dir",
         type=_dir_or_missing,
@@ -177,8 +187,6 @@ def _build_parser(default_data: Path) -> argparse.ArgumentParser:
         metavar="PATH",
         help="extra runtime patch file, applied after dstui's own (repeatable)",
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
-    return parser
 
 
 def _version() -> str:
@@ -242,5 +250,10 @@ def build_harness_config(settings: Settings) -> DeepSeekHarnessConfig:
         profile=settings.profile,
         dsh_bin=None if settings.dsh_bin is None else str(settings.dsh_bin),
         patches=(str(settings.patch_file), *(str(p) for p in settings.extra_patches)),
-        env={"DSH_TELEMETRY_DISABLED": "1", "DSH_AGENTS_HOME": str(settings.agents_home)},
+        env={
+            "DSH_TELEMETRY_DISABLED": "1",
+            "DSH_AGENTS_HOME": str(settings.agents_home),
+            # else the sdk profile's web_search sends it (and the queries) to DeepSeek
+            **({} if settings.needs_deepseek_key else {"DEEPSEEK_API_KEY": ""}),
+        },
     )
