@@ -14,9 +14,12 @@
 # The heavy tree is zstd-compressed and decompressed at install time by a BUNDLED
 # static zstd, so target hosts need neither Python nor zstd. `.py` sources are
 # dropped (sourceless `.pyc` only). makeself provides SHA256 integrity. x86-64.
+# The payload is owned by root:root with modes u+rwX,go+rX,go-w, and carries no
+# build-host path (checked).
 #
-# Build deps: uv, makeself, curl, gcc/make (to build the static zstd once).
-# Run `make lock` first (requirements.txt is installed hash-checked), and
+# Build deps: uv, makeself, curl, gcc/make (to build the static zstd once), readelf.
+# Run `make lock` first (requirements.txt is installed hash-checked, and
+# requirements-build.txt pins the build backend that builds the dstui wheel), and
 # `make dev-install` (the smoke test runs a real agent turn with the dev extra's
 # embedded runtime standing in for the separately installed dsh).
 #
@@ -44,10 +47,11 @@ STARTUP_IN="$ROOT/tools/package/startup.sh.in"
 CHECK_NO_RUNTIME="$ROOT/tools/package/check-no-runtime.sh"
 OUT="$DIST/$APP-install.sh"
 REQ="$ROOT/requirements.txt"
+BUILD_REQ="$ROOT/requirements-build.txt"
 CACHE="$ROOT/.cache/dstui-build"
-ZSTD_BIN="$CACHE/zstd-static-$ARCH"
 ZSTD_VERSION="1.5.6"
 ZSTD_SHA256="8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1"
+ZSTD_BIN="$CACHE/zstd-$ZSTD_VERSION-static-$ARCH"   # versioned: a bump never reuses the old one
 DEV_PY="$ROOT/.venv/bin/python"   # the dev-install venv (has the test-only embedded runtime)
 RUNTIME_DIST="deepseek-harness-runtime-bin"
 
@@ -55,7 +59,19 @@ VERSION="$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | cut -d'"' -f2)"
 [ -n "$VERSION" ] || { echo "ERROR: cannot read version from pyproject.toml" >&2; exit 1; }
 
 command -v makeself >/dev/null || { echo "ERROR: makeself not installed (apt-get install makeself)" >&2; exit 1; }
+command -v readelf >/dev/null || { echo "ERROR: readelf not installed (apt-get install binutils)" >&2; exit 1; }
 [ -f "$REQ" ] || { echo "ERROR: $REQ missing — run 'make lock' first" >&2; exit 1; }
+[ -f "$BUILD_REQ" ] || { echo "ERROR: $BUILD_REQ missing — run 'make lock' first" >&2; exit 1; }
+
+# makeself's own header extracts to ${TMPDIR:=/tmp}. Build from a copy defaulting to
+# /var/tmp, so running dstui-install.sh directly never unpacks into /tmp (often a small
+# RAM tmpfs) either — install.sh already defaults TMPDIR to /var/tmp.
+MAKESELF_HEADER=""
+for h in "$(dirname "$(readlink -f "$(command -v makeself)")")/makeself-header.sh" \
+         /usr/share/makeself/makeself-header.sh /usr/local/share/makeself/makeself-header.sh; do
+    if [ -f "$h" ]; then MAKESELF_HEADER="$h"; break; fi
+done
+[ -n "$MAKESELF_HEADER" ] || { echo "ERROR: cannot find makeself-header.sh" >&2; exit 1; }
 if grep -qiE "^$RUNTIME_DIST==" "$REQ"; then
     echo "ERROR: $RUNTIME_DIST in requirements.txt; dstui must not ship the DeepSeek runtime (run 'make lock')" >&2; exit 1
 fi
@@ -70,6 +86,13 @@ trap 'rm -rf "$WORK"' EXIT
 export TMPDIR="$WORK/tmp"
 mkdir -p "$TMPDIR"
 
+HEADER="$WORK/makeself-header.sh"
+# shellcheck disable=SC2016  # the ${TMPDIR:=...} text is matched and written literally
+sed 's|^TMPROOT=\\${TMPDIR:=/tmp}$|TMPROOT=\\${TMPDIR:=/var/tmp}|' "$MAKESELF_HEADER" > "$HEADER"
+# shellcheck disable=SC2016
+grep -qxF 'TMPROOT=\${TMPDIR:=/var/tmp}' "$HEADER" \
+    || { echo "ERROR: $MAKESELF_HEADER: no 'TMPROOT=\${TMPDIR:=/tmp}' line to patch" >&2; exit 1; }
+
 echo "==> $APP $VERSION -> makeself installer (CPython $PY_VERSION, sourceless, zstd -19)"
 
 # --- 1. Clean ------------------------------------------------------------
@@ -77,8 +100,10 @@ rm -rf "$STAGE" "$MKDIR" build src/*.egg-info
 mkdir -p "$STAGE" "$MKDIR" "$CACHE"
 
 # --- 2. Build the dstui wheel -------------------------------------------
-echo "==> Building $APP wheel"
-uv build --wheel -o "$DIST" >/dev/null
+# The build backend (hatchling and its dependencies) comes hash-checked from
+# requirements-build.txt, not freshly resolved from the index: its code writes the wheel.
+echo "==> Building $APP wheel (hash-pinned build backend)"
+uv build --wheel --build-constraints "$BUILD_REQ" --require-hashes -o "$DIST" >/dev/null
 WHEEL="$(ls "$DIST"/${APP}-${VERSION}-*.whl)"
 
 # --- 3. Stage a standalone, relocatable CPython -------------------------
@@ -115,10 +140,12 @@ rm -f "$STAGE/python/lib/python${PY_VERSION}/EXTERNALLY-MANAGED"
 # nothing on its own — in particular not the SDK's declared deepseek-harness-runtime-bin.
 # --no-cache-dir: never reuse the build host's pip cache — always fetch the current
 # artifacts through the configured index/proxy, so a stale or poisoned cached wheel body
-# can't ship. The bundle's module versions are then verified against the lock in step 12.
-echo "==> Installing $APP + dependencies (hash-checked, --no-deps, no cache)"
+# can't ship. --only-binary: never build an sdist here, whose build dependencies pip would
+# fetch without hash checks. The bundle's module versions are then verified against the
+# lock in step 12.
+echo "==> Installing $APP + dependencies (hash-checked wheels, --no-deps, no cache)"
 PIP=("$PY" -m pip install --no-input --disable-pip-version-check --no-warn-script-location
-     --no-cache-dir --no-compile --no-deps)
+     --no-cache-dir --no-compile --no-deps --only-binary :all:)
 "${PIP[@]}" --require-hashes -r "$REQ" >/dev/null
 "${PIP[@]}" "$WHEEL" >/dev/null
 
@@ -144,6 +171,28 @@ echo "==> Stripping dead weight (dep CLIs, headers, dep tests)"
 rm -rf "$STAGE/python/include" "$STAGE/python/share"
 rm -f "$STAGE/python/lib"/libpython*.a
 find "$SP" -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true
+
+# --- 5c. No build-host paths in the payload -----------------------------
+# uv rewrote the interpreter's sysconfig data from python-build-standalone's neutral
+# /install to its install path in the maintainer's home; pip stamped the console script
+# with the staging path. Put /install back (sysconfig derives the real paths from
+# sys.prefix at run time) and give the launcher a placeholder shebang, which the
+# installer rewrites to the bundled interpreter anyway.
+"$PY" -I - "$BASEP" "$STAGE/python/lib/python${PY_VERSION}"/_sysconfigdata_*.py <<'PYEOF'
+import sys
+base, *files = sys.argv[1:]
+for name in files:
+    with open(name, encoding="utf-8") as f:
+        text = f.read()
+    with open(name, "w", encoding="utf-8") as f:
+        f.write(text.replace(base, "/install"))
+PYEOF
+LAUNCHER="$STAGE/python/bin/$APP"
+case "$(head -n1 "$LAUNCHER")" in
+    '#!'*/python*) ;;
+    *) echo "ERROR: unexpected first line in pip's $APP launcher: $(head -n1 "$LAUNCHER")" >&2; exit 1 ;;
+esac
+sed -i "1s|.*|#!/install/bin/python${PY_VERSION}|" "$LAUNCHER"
 
 # --- 6. Sanity-check the staged interpreter ----------------------------
 # NB: do NOT `strip` libpython — it corrupts PBS symbol-version tables.
@@ -179,11 +228,26 @@ for dp, _dn, fn in os.walk(root, topdown=False):
 PYEOF
 
 # --- 7c. Sanity on the sourceless tree ---------------------------------
-"$PY" -s -c "import dstui, dstui.app, textual, deepseek_harness" \
+"$PY" -I -c "import dstui, dstui.app, textual, deepseek_harness" \
     || { echo "ERROR: sourceless bundle not importable" >&2; exit 1; }
 
+# The payload must not disclose the build host (account name, directory layout).
+leak_patterns=(-e "$BASEP" -e "$ROOT/")
+case "${HOME:-/}" in /) ;; *) leak_patterns+=(-e "$HOME/") ;; esac
+leaks="$(grep -rlaF "${leak_patterns[@]}" "$STAGE" || true)"
+[ -z "$leaks" ] || { echo "ERROR: build-host paths in the payload:" >&2; echo "$leaks" >&2; exit 1; }
+
 # --- 8. Obtain a static zstd (cached across builds) --------------------
-if ! "$ZSTD_BIN" --version >/dev/null 2>&1; then
+# Reused only while it is the pinned version and static (no program interpreter);
+# otherwise rebuilt from the checksummed source.
+zstd_ok() {
+    local out
+    out="$("$1" --version 2>/dev/null)" || return 1
+    case "$out" in *" v$ZSTD_VERSION,"*) ;; *) return 1 ;; esac
+    readelf -h "$1" >/dev/null 2>&1 || return 1
+    ! readelf -lW "$1" 2>/dev/null | grep -q 'Requesting program interpreter'
+}
+if ! zstd_ok "$ZSTD_BIN"; then
     echo "==> Building static zstd $ZSTD_VERSION (cached at $ZSTD_BIN)"
     ztmp="$(mktemp -d -p "$WORK")"
     curl -fsSL -o "$ztmp/z.tgz" \
@@ -197,6 +261,7 @@ if ! "$ZSTD_BIN" --version >/dev/null 2>&1; then
     strip "$ztmp/zstd-${ZSTD_VERSION}/programs/zstd"
     cp "$ztmp/zstd-${ZSTD_VERSION}/programs/zstd" "$ZSTD_BIN"
     rm -rf "$ztmp"
+    zstd_ok "$ZSTD_BIN" || { echo "ERROR: $ZSTD_BIN is not a static zstd $ZSTD_VERSION" >&2; exit 1; }
 fi
 cp "$ZSTD_BIN" "$MKDIR/zstd"
 chmod +x "$MKDIR/zstd"
@@ -205,7 +270,15 @@ chmod +x "$MKDIR/zstd"
 mkdir -p "$STAGE/doc"
 cp -p README.md LICENSE CHANGELOG.md "$STAGE/doc/" 2>/dev/null || true
 echo "==> Compressing payload (zstd -19 -T0)"
-tar -C "$STAGE" -cf - python doc | "$MKDIR/zstd" -19 -T0 -q -o "$MKDIR/bundle.tar.zst"
+# root:root and no group/other write bits: tar run as root on the target restores both,
+# and the installer must not hand the tree to whichever local account has the build
+# user's uid (see also startup.sh.in).
+tar --owner=0 --group=0 --numeric-owner --mode='u+rwX,go+rX,go-w' \
+    -C "$STAGE" -cf - python doc | "$MKDIR/zstd" -19 -T0 -q -o "$MKDIR/bundle.tar.zst"
+foreign="$("$MKDIR/zstd" -dc "$MKDIR/bundle.tar.zst" | tar --numeric-owner -tvf - \
+    | awk '$2 != "0/0" || substr($1, 6, 1) == "w" || substr($1, 9, 1) == "w"')"
+[ -z "$foreign" ] || { echo "ERROR: payload entries not root-owned or group/other-writable:" >&2
+                       printf '%s\n' "$foreign" | sed 5q >&2; exit 1; }
 
 # --- 10. Generate the makeself startup script (baked-in version/py) ----
 {
@@ -218,12 +291,19 @@ chmod +x "$MKDIR/startup.sh"
 
 # --- 11. Assemble the self-extracting installer with makeself ----------
 # --nox11: run the startup script inline (no xterm). --nocomp: the payload is
-# already zstd-compressed. --sha256: integrity check on extraction.
+# already zstd-compressed. --sha256: integrity check on extraction. --header: the
+# /var/tmp-defaulting copy made above. `sh ./startup.sh`, not ./startup.sh: makeself's
+# temp dir may be mounted noexec (CIS-hardened /var/tmp).
 echo "==> Assembling makeself installer"
 rm -f "$OUT"
-makeself --nox11 --nocomp --sha256 --tar-quietly \
-    "$MKDIR" "$OUT" "dstui $VERSION installer" ./startup.sh >/dev/null
+chmod -R u+rwX,go+rX,go-w "$MKDIR"   # like the payload: nobody else may write what root runs
+makeself --nox11 --nocomp --sha256 --tar-quietly --header "$HEADER" \
+    --tar-extra "--owner=0 --group=0 --numeric-owner" \
+    "$MKDIR" "$OUT" "dstui $VERSION installer" sh ./startup.sh >/dev/null
 rm -rf "$STAGE" "$MKDIR"
+# shellcheck disable=SC2016
+[ "$(grep -m1 -a '^TMPROOT=' "$OUT")" = 'TMPROOT=${TMPDIR:=/var/tmp}' ] \
+    || { echo "ERROR: $OUT does not default its extraction dir to /var/tmp" >&2; exit 1; }
 
 # --- 12. Smoke test: install to a temp prefix + run --------------------
 echo "==> Smoke test (install to a temp prefix under /var/tmp + run)"
@@ -234,7 +314,7 @@ BUNDLE_PY="$TPREFIX/lib/$APP/bin/python${PY_VERSION}"
 # Version audit: confirm every installed module matches requirements.txt, at both
 # the dist-info metadata AND the imported-code (__version__) level.
 echo "==> Verifying bundled module versions against requirements.txt"
-"$BUNDLE_PY" -s "$ROOT/tools/package/verify-versions.py" "$REQ" \
+"$BUNDLE_PY" -I "$ROOT/tools/package/verify-versions.py" "$REQ" \
     || { echo "ERROR: bundled module versions do not match requirements.txt (stale build?)" >&2; exit 1; }
 
 # What the installer laid down carries no DeepSeek runtime and nothing Node either.
@@ -259,6 +339,23 @@ esac
 version_out="$("$TPREFIX/bin/$APP" --version)"
 [ "$version_out" = "$APP $VERSION" ] \
     || { echo "ERROR: '$APP --version' printed '$version_out', want '$APP $VERSION'" >&2; exit 1; }
+
+# Hermetic (-I): a host PYTHONPATH with its own pydantic, a module in the cwd reached
+# through an empty PYTHONPATH entry, and a stray PYTHONHOME must all be ignored.
+HOSTILE="$WORK/hostile"
+mkdir -p "$HOSTILE/pydantic"
+echo 'raise ImportError("a host pydantic shadowed the bundled one")' > "$HOSTILE/pydantic/__init__.py"
+echo 'raise ImportError("a module from the cwd was imported")' > "$HOSTILE/textual.py"
+hostile_out="$(cd "$HOSTILE" && PYTHONPATH="$HOSTILE:" PYTHONHOME=/nonexistent \
+    "$TPREFIX/bin/$APP" --version 2>&1)" \
+    || { echo "ERROR: '$APP --version' fails with PYTHONPATH/PYTHONHOME set: $hostile_out" >&2; exit 1; }
+[ "$hostile_out" = "$APP $VERSION" ] \
+    || { echo "ERROR: with PYTHONPATH/PYTHONHOME set '$APP --version' printed '$hostile_out'" >&2; exit 1; }
+
+# Usable by every user, writable only by the installing one.
+bad_modes="$(find "$TPREFIX" ! -type l \( -perm /022 -o ! -perm -004 -o \( -type d ! -perm -005 \) \))"
+[ -z "$bad_modes" ] || { echo "ERROR: installed files with wrong modes:" >&2
+                         printf '%s\n' "$bad_modes" | sed 5q >&2; exit 1; }
 
 # No dsh anywhere (empty PATH, and the bundle has no embedded runtime): a clear error and
 # exit 1 before the TUI starts or anything is created.
@@ -362,11 +459,11 @@ async def mount():
 asyncio.run(mount())
 print("probe ok")
 PYEOF
-if ! "$BUNDLE_PY" -s "$PROBE" "$ROOT/tests/fake_deepseek.py" "$STANDIN" "$WORK/probe" >/dev/null; then
+if ! "$BUNDLE_PY" -I "$PROBE" "$ROOT/tests/fake_deepseek.py" "$STANDIN" "$WORK/probe" >/dev/null; then
     echo "ERROR: bundle probe failed (agent turn via --dsh-bin, runtime cleanup, or TUI mount)" >&2
     exit 1
 fi
-echo "    ok (versions, no runtime/Node, bin=dstui, --help, --version, no-dsh exit 1, agent turn, TUI mount)"
+echo "    ok (versions, no runtime/Node, bin=dstui, --help, --version, hermetic, modes, no-dsh exit 1, agent turn, TUI mount)"
 
 # --- 13. Report --------------------------------------------------------
 SIZE="$(du -h "$OUT" | cut -f1)"
@@ -374,8 +471,9 @@ echo ""
 echo "Built installer:"
 echo "  $OUT  ($SIZE)"
 echo ""
-echo "Install on any linux-x86_64 host (no Python, no zstd required):"
-echo "  ./dstui-install.sh                           # -> ~/.local"
-echo "  DSTUI_PREFIX=/usr/local ./dstui-install.sh   # system install"
+echo "Install on any linux-x86_64 glibc host (no Python, no zstd required):"
+echo "  sh ./dstui-install.sh                                # -> ~/.local"
+echo "  sh ./dstui-install.sh -- --prefix DIR                # or DSTUI_PREFIX=DIR"
+echo "  sudo DSTUI_PREFIX=/usr/local sh ./dstui-install.sh   # system install"
 echo "  dstui --help"
 echo "Requires DeepSeek Harness, installed separately: npm install -g @deepseek-ai/dsh (Node >= 22.19)"

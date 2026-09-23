@@ -634,3 +634,41 @@ def test_resolve_dsh_bin_raises_when_there_is_no_runtime_at_all(
         resolve_dsh_bin(None)
 
     assert str(raised.value) == DSH_NOT_FOUND
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [["", "{bin}"], ["{bin}", ""], ["{bin}", "", "{bin}"], ["."], ["subdir"], ["./subdir"]],
+    ids=["leading-empty", "trailing-empty", "double-colon", "dot", "relative", "dot-relative"],
+)
+def test_resolve_dsh_bin_ignores_empty_and_relative_path_entries(
+    entries: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty or relative PATH entry means the cwd, by default the agent-writable workspace:
+    a ``dsh`` planted there must never run (dstui starts dsh outside the sandbox)."""
+    workspace, clean_bin = tmp_path / "ws", tmp_path / "clean-bin"
+    (workspace / "subdir").mkdir(parents=True)
+    clean_bin.mkdir()
+    put_on_path(workspace)
+    put_on_path(workspace / "subdir")
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("PATH", ":".join(e.format(bin=clean_bin) for e in entries))
+    set_runtime_importable(monkeypatch, False)
+
+    with pytest.raises(DshNotFoundError):
+        resolve_dsh_bin(None)
+
+
+def test_resolve_dsh_bin_returns_an_absolute_path_after_a_relative_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, real_bin = tmp_path / "ws", tmp_path / "real-bin"
+    workspace.mkdir()
+    real_bin.mkdir()
+    put_on_path(workspace)
+    real = put_on_path(real_bin)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("PATH", f".::{real_bin}")
+    set_runtime_importable(monkeypatch, False)
+
+    assert resolve_dsh_bin(None) == real

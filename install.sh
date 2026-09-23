@@ -37,10 +37,11 @@ if [ "$OS" != "Linux" ] || [ "$ARCH" != "x86_64" ]; then
     exit 1
 fi
 
+# HTTPS only, redirects included (GitHub redirects release downloads to its CDN).
 if command -v curl >/dev/null 2>&1; then
-    dl() { curl -fsSL "$1" -o "$2"; }
+    dl() { curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2"; }
 elif command -v wget >/dev/null 2>&1; then
-    dl() { wget -qO "$2" "$1"; }
+    dl() { wget --https-only -qO "$2" "$1"; }
 else
     echo "dstui: need curl or wget to download the installer" >&2
     exit 1

@@ -15,7 +15,7 @@ It has no server or state of its own beyond a data directory.
 > **Requires DeepSeek Harness, installed separately:** `npm install -g @deepseek-ai/dsh`
 > (Node.js >= 22.19). dstui does not bundle it.
 
-Linux x86_64 only. No Python or other dependencies needed: the installer ships its own.
+Linux x86_64 (glibc) only. No Python or other dependencies needed: the installer ships its own.
 
 ```bash
 curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | sh
@@ -24,9 +24,12 @@ curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.s
 Installs to `~/.local` by default. Override the prefix, or pin a version, via env:
 
 ```bash
-curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | DSTUI_PREFIX=/usr/local sh
+curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | sudo DSTUI_PREFIX=/usr/local sh
 curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | DSTUI_VERSION=v0.1.0 sh
 ```
+
+The installed files belong to whoever runs the installer (root for a system install), and
+every user can read and run them.
 
 Then:
 
@@ -41,12 +44,18 @@ dstui -w ~/src/project -m deepseek-v4-pro --effort max
 - **DeepSeek Harness, installed separately:** `npm install -g @deepseek-ai/dsh` (needs
   Node.js >= 22.19). dstui does not bundle it. It runs, in this order: the `--dsh-bin`
   executable, else `dsh` from `PATH`, else the SDK's embedded runtime if that is installed
-  (only development and test installs have it). Without any of them dstui exits with
-  `DeepSeek Harness (dsh) not found`.
+  (development and test installs have it, and so does a `pip install` of dstui; the installer
+  does not). Without any of them dstui exits with `DeepSeek Harness (dsh) not found`.
+
+  dstui starts that `dsh` as your user, outside the agent's sandbox. Empty and relative `PATH`
+  entries are skipped, because they mean the current directory, by default the agent's
+  workspace. Any other program named `dsh` on `PATH` is used too, for example the distributed
+  shell from Debian's `dsh` package. Pass `--dsh-bin /absolute/path` to pin the right one.
 - A DeepSeek API key in `DEEPSEEK_API_KEY`. `DEEPSEEK_BASE_URL` is optional and points the
   agent at a different endpoint. Not used with another provider (see
   [Other providers](#other-providers)).
-- Linux x86_64. It is the only platform tested, and the only one the installer supports.
+- Linux x86_64 with glibc (not musl). It is the only platform tested, and the only one the
+  installer supports.
 
 The SDK comes from PyPI, following the official DeepSeek Harness install instructions
 (`pip install deepseek-harness-sdk`). dstui pins `deepseek-harness-sdk==0.1.5rc1`, the latest
@@ -60,7 +69,7 @@ SDK.
 With [uv](https://docs.astral.sh/uv/), which also installs Python 3.14:
 
 ```sh
-make dev-install                  # .venv with dstui (editable) and the development tools
+make dev-install                  # .venv with dstui (editable) and the locked development tools
 .venv/bin/dstui -w ~/src/project
 ```
 
@@ -208,8 +217,8 @@ reset it). Session logs and `dstui.log` are never pruned.
 ## Development
 
 ```sh
-make dev-install                        # .venv: dstui editable + the [dev] extra
-make check                              # ruff (lint + format) and mypy --strict
+make dev-install                        # .venv: the hash-locked [dev] extra + dstui editable
+make check                              # ruff (lint + format), mypy --strict and bandit
 make test                               # everything
 make test PYTEST_ARGS='-m "not e2e"'    # unit and UI tests only (fast, no runtime)
 make test PYTEST_ARGS='-m e2e'          # bridge and full-app tests on the real runtime
@@ -236,8 +245,11 @@ uv run pytest --basetemp=/var/tmp/dstui-$USER-pytest -m "not e2e"
 rm -rf /var/tmp/dstui-$USER-pytest "$TMPDIR"
 ```
 
-`requirements.txt` and `requirements-dev.txt` (from `make lock`) are the locks. `uv run` works in
-the `.venv` as it is, without a `uv.lock`.
+`requirements.txt`, `requirements-dev.txt` and `requirements-build.txt` (from `make lock`) are
+the locks, fully hashed: what the installer bundles, what `make dev-install` and CI install, and
+the build backend that builds the shipped wheel. A test fails when `pyproject.toml` asks for
+something the locks do not satisfy. `uv run` works in the `.venv` as it is, without a
+`uv.lock`.
 
 Code layout (`src/dstui/`):
 
@@ -252,11 +264,19 @@ Code layout (`src/dstui/`):
 ## Packaging
 
 `make package` produces `dist/dstui-install.sh`, a single **makeself** self-extracting,
-run-once installer (**linux-x86_64**, ~31 MB). It carries a relocatable CPython 3.14 with dstui
-and every dependency, **sourceless-precompiled** (`.pyc` only). The tree is **zstd -19**
-compressed and unpacked at install time by a **bundled static zstd**, so the target host needs
-neither Python nor zstd. makeself adds a **SHA256** integrity check, and the `-s` launcher
-keeps it hermetic (ignores the host user site). Only `dstui` goes on `PATH`.
+run-once installer (**linux-x86_64**, glibc, ~31 MB). It carries a relocatable CPython 3.14
+with dstui and every dependency, **sourceless-precompiled** (`.pyc` only). The tree is
+**zstd -19** compressed and unpacked at install time by a **bundled static zstd**, so the target
+host needs neither Python nor zstd. makeself adds a **SHA256** integrity check. The launcher
+runs the bundled Python in isolated mode (`-I`), so `PYTHONPATH`, `PYTHONHOME`, the user site
+and the current directory never reach it. Only `dstui` goes on `PATH`.
+
+The payload is owned by `root:root` with no group or other write bits, and the installer
+extracts it without restoring owners, so the installed tree belongs to whoever installs and is
+readable by everyone. It refuses a prefix with whitespace or one too long for a `#!` line,
+resolves a relative prefix against the directory it was started from, checks that the bundled
+Python runs on the host before replacing an existing install, and works when its temp directory
+is mounted `noexec`. It unpacks under `$TMPDIR`, by default `/var/tmp` (never `/tmp`).
 
 **It does not contain DeepSeek Harness.** `requirements.txt` leaves out
 `deepseek-harness-runtime-bin`, the dependencies install hash-checked with `--no-deps`, and
@@ -264,19 +284,27 @@ keeps it hermetic (ignores the host user site). Only `dstui` goes on `PATH`.
 is in the bundle.
 
 ```bash
-./dstui-install.sh                           # -> ~/.local
-DSTUI_PREFIX=/usr/local ./dstui-install.sh   # system install
-sh ./dstui-install.sh --check                # verify integrity only
+sh ./dstui-install.sh                                # -> ~/.local
+sh ./dstui-install.sh -- --prefix ~/opt/dstui        # or DSTUI_PREFIX=~/opt/dstui
+sudo DSTUI_PREFIX=/usr/local sh ./dstui-install.sh   # system install
+sh ./dstui-install.sh --check                        # verify integrity only
 dstui --help
 ```
 
-Build deps: `uv`, `makeself`, `curl`, and a C toolchain (to build the static zstd once; it is
-cached under `.cache/`). Run `make lock` and `make dev-install` first. All temporary files go to
-a private directory under `/var/tmp`. The build then installs the result into a temporary
-prefix and checks it: every module's version against `requirements.txt`, no runtime or Node
-files, only `dstui` in `bin/`, `--help`, `--version`, a clear exit 1 without any `dsh`, and one
-real agent turn against the fake API through `--dsh-bin`, with the `[dev]` extra's embedded
-runtime standing in for a separately installed `dsh` (it is not copied into the bundle).
+`--target DIR` (without `--`) is makeself's own option: it only unpacks the raw payload into
+`DIR`. Use `DSTUI_PREFIX` or `-- --prefix DIR`.
+
+Build deps: `uv`, `makeself`, `curl`, `readelf`, and a C toolchain (to build the static zstd
+once; it is cached under `.cache/`, per version). Run `make lock` and `make dev-install` first.
+The dstui wheel is built by the hash-pinned backend of `requirements-build.txt`, and the
+dependencies are installed as hash-checked wheels only. All temporary files go to a private
+directory under `/var/tmp`. The build fails if the payload holds a build-host path (the
+maintainer's home or checkout). It then installs the result into a temporary prefix and checks
+it: every module's version against `requirements.txt`, no runtime or Node files, only `dstui`
+in `bin/`, `--help`, `--version` (also with a hostile `PYTHONPATH`/`PYTHONHOME`), file modes, a
+clear exit 1 without any `dsh`, and one real agent turn against the fake API through
+`--dsh-bin`, with the `[dev]` extra's embedded runtime standing in for a separately installed
+`dsh` (it is not copied into the bundle).
 
 ## Releasing
 
@@ -287,5 +315,8 @@ and the `install.sh` bootstrap behind the one-liner in the [Quick Start](#quick-
 
 Before releasing: bump `version` in `pyproject.toml`, add entries under `## [Unreleased]` (an
 empty section is refused), and run `make lock` if dependencies changed. Pre-flight guards
-require a clean tree on `main`, in sync with `origin`, with the tag and release not yet present.
-For CI or other non-interactive runs, set `DSTUI_RELEASE_ASSUME_YES=1` to skip the prompt.
+require a clean tree on `main` (untracked files and `assume-unchanged` / `skip-worktree`
+entries count), in sync with `origin`, with the tag and release not yet present. For CI or
+other non-interactive runs, set `DSTUI_RELEASE_ASSUME_YES=1` to skip the prompt. The dependency
+audit (`pip-audit` of all three locks) runs daily and on every change to a lock; check that its
+last run is green before releasing.

@@ -36,34 +36,65 @@ def _canon(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+# PEP 440's own version grammar (Appendix B), so the comparison needs no third-party
+# `packaging`: the bundle does not carry it, and the dev venv must not be put on
+# sys.path (it would shadow the very modules being audited).
+_PEP440 = re.compile(
+    r"""
+    v?
+    (?:(?P<epoch>[0-9]+)!)?
+    (?P<release>[0-9]+(?:\.[0-9]+)*)
+    (?:[-_.]?(?P<pre_l>alpha|a|beta|b|preview|pre|c|rc)[-_.]?(?P<pre_n>[0-9]+)?)?
+    (?P<post>-(?P<post_n1>[0-9]+)|[-_.]?(?:post|rev|r)[-_.]?(?P<post_n2>[0-9]+)?)?
+    (?P<dev>[-_.]?dev[-_.]?(?P<dev_n>[0-9]+)?)?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+_PRE = {"alpha": "a", "beta": "b", "c": "rc", "pre": "rc", "preview": "rc"}
+
+
+def _pep440_key(version: str) -> tuple[object, ...] | None:
+    """A key equal for exactly the versions PEP 440 considers equal; None if unparsable."""
+    m = _PEP440.fullmatch(version.strip())
+    if m is None:
+        return None
+    release = [int(part) for part in m["release"].split(".")]
+    while len(release) > 1 and release[-1] == 0:
+        release.pop()  # 1.0 == 1.0.0
+    pre = None
+    if m["pre_l"]:
+        label = m["pre_l"].lower()
+        pre = (_PRE.get(label, label), int(m["pre_n"] or 0))
+    post = int(m["post_n1"] or m["post_n2"] or 0) if m["post"] else None
+    dev = int(m["dev_n"] or 0) if m["dev"] else None
+    local = None
+    if m["local"]:
+        local = tuple(
+            int(seg) if seg.isdigit() else seg for seg in re.split(r"[-_.]", m["local"].lower())
+        )
+    return (int(m["epoch"] or 0), tuple(release), pre, post, dev, local)
+
+
 def _ver_eq(a: str, b: str) -> bool:
-    """Compare two version strings, tolerating PEP 440 normalization."""
+    """Compare two version strings with PEP 440 normalization (1.0 == 1.0.0,
+    0.1.5rc1 == 0.1.5.rc1, 2026.06.17 == 2026.6.17); unparsable ones must match exactly."""
     a, b = a.strip(), b.strip()
     if a == b:
         return True
-    try:
-        from packaging.version import Version
-
-        return Version(a) == Version(b)
-    except Exception:
-        # Fallback: normalize leading zeros in dotted numeric segments
-        # (e.g. certifi's "2026.06.17" vs PEP 440 "2026.6.17").
-        def norm(v: str) -> str:
-            return ".".join(
-                str(int(p)) if p.isdigit() else p for p in re.split(r"\.", v)
-            )
-
-        return norm(a) == norm(b)
+    key_a, key_b = _pep440_key(a), _pep440_key(b)
+    return key_a is not None and key_a == key_b
 
 
 def _parse_pins(path: str) -> dict[str, str]:
     pins: dict[str, str] = {}
-    for raw in open(path, encoding="utf-8"):
-        if not raw[:1].strip() or raw.lstrip().startswith(("#", "-")):
-            continue  # skip hash / comment / option continuation lines
-        m = _PIN.match(raw.strip())
-        if m:
-            pins[_canon(m.group(1))] = m.group(2)
+    with open(path, encoding="utf-8") as lock:
+        for raw in lock:
+            if not raw[:1].strip() or raw.lstrip().startswith(("#", "-")):
+                continue  # skip hash / comment / option continuation lines
+            m = _PIN.match(raw.strip())
+            if m:
+                pins[_canon(m.group(1))] = m.group(2)
     return pins
 
 

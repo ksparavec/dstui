@@ -76,15 +76,16 @@ include = [
     ".python-version",
     "requirements.txt",
     "requirements-dev.txt",
+    "requirements-build.txt",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
     "pyproject.toml",
 ]
 
-# `make dev-install` builds .venv with uv pip from the [dev] extra; requirements*.txt are the
-# locks. Not a uv-managed project, so `uv run` runs in that .venv as it is, instead of writing
-# a uv.lock and syncing the environment away from the [dev] extra.
+# `make dev-install` builds .venv with uv pip from requirements-dev.txt (the hash-locked [dev]
+# extra); requirements*.txt are the locks. Not a uv-managed project, so `uv run` runs in that
+# .venv as it is, instead of writing a uv.lock and syncing the environment away from the locks.
 [tool.uv]
 managed = false
 

@@ -1,0 +1,593 @@
+"""The installer: install.sh, the makeself startup script, check-no-runtime.sh, verify-versions.py.
+
+Hermetic and fast: fake ``uname`` / ``curl`` / ``wget`` / ``zstd`` executables, a plain tar as
+the payload and everything else under ``tmp_path``. Nothing reaches GitHub.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import io
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+from collections.abc import Iterator
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+
+from tests.helpers_scripts import (
+    INSTALL_SH,
+    ROOT,
+    SYSTEM_PATH,
+    VERSION,
+    run_script,
+    write_program,
+)
+
+STARTUP_IN = ROOT / "tools" / "package" / "startup.sh.in"
+CHECK_NO_RUNTIME = ROOT / "tools" / "package" / "check-no-runtime.sh"
+VERIFY_VERSIONS = ROOT / "tools" / "package" / "verify-versions.py"
+RELEASES = "https://github.com/ksparavec/dstui/releases"
+NODE_SEA_FUSE = b"NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"
+
+
+# ----------------------------------------------------------------------------------- install.sh
+
+
+@pytest.fixture
+def fake_bin(tmp_path: Path) -> Path:
+    """Fake uname (Linux x86_64) and curl: curl logs its arguments and 'downloads' an installer
+    that reports its own path, DSTUI_PREFIX and TMPDIR."""
+    bin_dir = tmp_path / "fake-bin"
+    write_program(
+        bin_dir / "uname",
+        'case "$1" in -s) echo "${FAKE_OS:-Linux}" ;; -m) echo "${FAKE_ARCH:-x86_64}" ;; esac\n',
+    )
+    write_program(
+        bin_dir / "curl",
+        'printf "%s\\n" "$@" > "$FAKE_LOG"\n'
+        '[ -z "$FAKE_CURL_FAIL" ] || exit 22\n'
+        'while [ $# -gt 1 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
+        "cat > \"$out\" <<'EOF'\n"
+        'echo "installer=$0"\n'
+        'echo "prefix=$DSTUI_PREFIX"\n'
+        'echo "tmpdir=$TMPDIR"\n'
+        "EOF\n",
+    )
+    return bin_dir
+
+
+def install_env(tmp_path: Path, fake_bin: Path, **extra: str) -> dict[str, str]:
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "PATH": f"{fake_bin}:{SYSTEM_PATH}",
+        "FAKE_LOG": str(tmp_path / "curl.log"),
+        "TMPDIR": str(tmp_path),
+    }
+    return env | extra
+
+
+def run_install(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return run_script(["sh", str(INSTALL_SH)], env)
+
+
+def installer_report(stdout: str) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in stdout.splitlines() if "=" in line)
+
+
+@pytest.mark.parametrize(
+    ("os_name", "arch"), [("Darwin", "arm64"), ("Linux", "aarch64"), ("FreeBSD", "x86_64")]
+)
+def test_install_sh_refuses_an_unsupported_platform(
+    os_name: str, arch: str, tmp_path: Path, fake_bin: Path
+) -> None:
+    result = run_install(install_env(tmp_path, fake_bin, FAKE_OS=os_name, FAKE_ARCH=arch))
+
+    assert result.returncode == 1
+    assert f"unsupported platform {os_name}/{arch}" in result.stderr
+    assert not (tmp_path / "curl.log").exists()  # nothing downloaded
+
+
+@pytest.mark.parametrize(
+    ("version", "url"),
+    [
+        (None, f"{RELEASES}/latest/download/dstui-install.sh"),
+        ("v0.1.0", f"{RELEASES}/download/v0.1.0/dstui-install.sh"),
+    ],
+    ids=["latest", "pinned"],
+)
+def test_install_sh_downloads_the_release_asset_and_runs_it(
+    version: str | None, url: str, tmp_path: Path, fake_bin: Path
+) -> None:
+    extra = {"DSTUI_PREFIX": str(tmp_path / "prefix")}
+    if version is not None:
+        extra["DSTUI_VERSION"] = version
+
+    result = run_install(install_env(tmp_path, fake_bin, **extra))
+
+    assert result.returncode == 0, result.stderr
+    assert url in (tmp_path / "curl.log").read_text().splitlines()
+    report = installer_report(result.stdout)
+    assert report["prefix"] == str(tmp_path / "prefix")
+    assert not Path(report["installer"]).exists()  # the downloaded installer is removed
+
+
+def test_install_sh_fails_when_the_download_fails(tmp_path: Path, fake_bin: Path) -> None:
+    result = run_install(install_env(tmp_path, fake_bin, FAKE_CURL_FAIL="1"))
+
+    assert result.returncode == 1
+    assert "download failed" in result.stderr
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith("dstui-install")] == []
+
+
+def test_install_sh_stages_the_download_in_tmpdir(tmp_path: Path, fake_bin: Path) -> None:
+    result = run_install(install_env(tmp_path, fake_bin))
+
+    assert result.returncode == 0, result.stderr
+    report = installer_report(result.stdout)
+    assert Path(report["installer"]).parent == tmp_path
+    assert report["tmpdir"] == str(tmp_path)
+
+
+def test_install_sh_stages_in_var_tmp_never_tmp_without_tmpdir(
+    tmp_path: Path, fake_bin: Path
+) -> None:
+    env = install_env(tmp_path, fake_bin)
+    del env["TMPDIR"]
+
+    result = run_install(env)
+
+    assert result.returncode == 0, result.stderr
+    report = installer_report(result.stdout)
+    assert Path(report["installer"]).parent == Path("/var/tmp")
+    assert report["tmpdir"] == "/var/tmp"  # the installer extracts there too, not in /tmp
+    assert not Path(report["installer"]).exists()
+
+
+def curl_args(tmp_path: Path) -> list[str]:
+    return (tmp_path / "curl.log").read_text().splitlines()
+
+
+def test_install_sh_downloads_over_https_only_with_curl(tmp_path: Path, fake_bin: Path) -> None:
+    """No redirect may downgrade the download to plain HTTP (as rustup and uv do it)."""
+    result = run_install(install_env(tmp_path, fake_bin))
+
+    assert result.returncode == 0, result.stderr
+    args = curl_args(tmp_path)
+    assert args[args.index("--proto") + 1] == "=https"
+    assert "--tlsv1.2" in args
+
+
+def test_install_sh_falls_back_to_wget_over_https_only(tmp_path: Path, fake_bin: Path) -> None:
+    """A PATH without curl: only the tools install.sh needs, and a fake wget."""
+    bin_dir = tmp_path / "wget-bin"
+    bin_dir.mkdir()
+    shutil.copy2(fake_bin / "uname", bin_dir / "uname")
+    for tool in ("sh", "mktemp", "rm"):
+        (bin_dir / tool).symlink_to(shutil.which(tool) or tool)
+    write_program(
+        bin_dir / "wget",
+        'printf "%s\\n" "$@" > "$FAKE_LOG"\n'
+        'while [ $# -gt 0 ]; do case "$1" in -*O) out="$2"; shift ;; esac; shift; done\n'
+        'printf \'echo "installer=$0"\\n\' > "$out"\n',
+    )
+    env = install_env(tmp_path, fake_bin) | {"PATH": str(bin_dir)}
+
+    result = run_install(env)
+
+    assert result.returncode == 0, result.stderr
+    args = curl_args(tmp_path)  # the fake wget logs to the same file
+    assert "--https-only" in args
+    assert f"{RELEASES}/latest/download/dstui-install.sh" in args
+    assert "installer=" in result.stdout
+
+
+def test_install_sh_names_the_repo_once_and_says_dsh_is_separate() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+
+    assert [line for line in code if "ksparavec/dstui" in line] == ['REPO="ksparavec/dstui"']
+    assert "@deepseek-ai/dsh" in text  # the header says dsh is a separate install
+
+
+# ------------------------------------------------------------------------ installer startup
+
+FOREIGN_ID = 4242  # the archive's owner: a uid/gid that means nothing on the installing host
+UNSHARE = shutil.which("unshare")
+
+
+def make_extraction_dir(tmp_path: Path, python: str = "echo bundled python\n") -> Path:
+    """What makeself extracts: startup.sh, a zstd and bundle.tar.zst (here: a plain tar).
+
+    Like a careless build, the tar keeps a foreign owner and group-writable modes. ``python``
+    is the body of the fake bundled interpreter (the installer runs it once before installing).
+    """
+    here = tmp_path / "extracted"
+    write_program(here / "zstd", 'cat "$2"\n')  # called as: zstd -dc bundle.tar.zst
+    members = {
+        "python/": None,
+        "python/bin/": None,
+        "python/bin/python3.14": f"#!/bin/sh\n{python}",
+        "python/bin/dstui": "#!/build/host/dist/.build/python/bin/python3.14\nprint('dstui')\n",
+        "python/lib/": None,
+        "python/lib/module.pyc": "pyc",
+        "doc/": None,
+        "doc/README.md": "# dstui\n",
+    }
+    with tarfile.open(here / "bundle.tar.zst", "w") as bundle:
+        for name, content in members.items():
+            info = tarfile.TarInfo(name.rstrip("/"))
+            info.uid = info.gid = FOREIGN_ID
+            if content is None:
+                info.type, info.mode = tarfile.DIRTYPE, 0o775
+                bundle.addfile(info)
+                continue
+            data = content.encode()
+            info.size = len(data)
+            info.mode = 0o775 if "/bin/" in name else 0o664
+            bundle.addfile(info, io.BytesIO(data))
+    baked = f"DSTUI_VERSION={VERSION}\nPYVER=3.14\n"  # as build-binary.sh bakes them in
+    write_program(here / "startup.sh", baked + STARTUP_IN.read_text())
+    return here
+
+
+def run_startup(
+    here: Path, tmp_path: Path, *args: str, wrap: tuple[str, ...] = (), **env: str
+) -> subprocess.CompletedProcess[str]:
+    """Run startup.sh as makeself does: from ``here``, under umask 077, via ``sh``."""
+    base = {"HOME": str(tmp_path / "home"), "PATH": SYSTEM_PATH, "TMPDIR": str(tmp_path)}
+    command = [*wrap, "sh", "-c", 'umask 077 && exec sh ./startup.sh "$@"', "sh", *args]
+    return run_script(command, base | env, cwd=here)
+
+
+@pytest.fixture
+def short(tmp_path: Path) -> Iterator[Path]:
+    """A short path (a symlink to ``tmp_path`` under /var/tmp) for install prefixes.
+
+    The installer refuses a prefix whose launcher shebang exceeds the kernel's 127 bytes, and
+    pytest's temp paths can be longer than that allows.
+    """
+    holder = Path(tempfile.mkdtemp(prefix="dstui-p.", dir="/var/tmp"))
+    link = holder / "t"
+    link.symlink_to(tmp_path, target_is_directory=True)
+    yield link
+    shutil.rmtree(holder)
+
+
+def assert_installed(prefix: Path) -> None:
+    assert sorted(p.name for p in (prefix / "bin").iterdir()) == ["dstui"]
+    assert os.readlink(prefix / "bin" / "dstui") == f"{prefix}/lib/dstui/bin/dstui"
+    script = (prefix / "lib" / "dstui" / "bin" / "dstui").read_text().splitlines()
+    assert script == [f"#!{prefix}/lib/dstui/bin/python3.14 -I", "print('dstui')"]
+    assert (prefix / "share" / "doc" / "dstui" / "README.md").is_file()
+    assert [p.name for p in prefix.iterdir() if p.name.startswith(".")] == []  # stage removed
+
+
+def assert_usable_by_everyone_writable_only_by_owner(prefix: Path) -> None:
+    for path in [prefix, *prefix.rglob("*")]:
+        if path.is_symlink():
+            continue
+        mode = path.stat().st_mode
+        assert mode & 0o022 == 0, f"group/other-writable: {path} {oct(mode)}"
+        assert mode & 0o004, f"not world-readable: {path} {oct(mode)}"
+        if path.is_dir():
+            assert mode & 0o001, f"not world-traversable: {path} {oct(mode)}"
+
+
+def test_startup_installs_into_dstui_prefix_with_only_dstui_on_path(
+    tmp_path: Path, short: Path
+) -> None:
+    prefix = short / "prefix"
+
+    result = run_startup(make_extraction_dir(tmp_path), tmp_path, DSTUI_PREFIX=str(prefix))
+
+    assert result.returncode == 0, result.stderr
+    assert_installed(prefix)
+
+
+def test_startup_launcher_runs_the_bundled_python_isolated(tmp_path: Path, short: Path) -> None:
+    """-I, not just -s: PYTHONPATH/PYTHONHOME and the script's directory never reach sys.path."""
+    prefix = short / "prefix"
+
+    run_startup(make_extraction_dir(tmp_path), tmp_path, DSTUI_PREFIX=str(prefix))
+
+    shebang = (prefix / "lib" / "dstui" / "bin" / "dstui").read_text().splitlines()[0]
+    assert shebang.endswith(" -I")
+
+
+def test_startup_prefix_option_wins_over_dstui_prefix(tmp_path: Path, short: Path) -> None:
+    prefix = short / "chosen"
+
+    result = run_startup(
+        make_extraction_dir(tmp_path),
+        tmp_path,
+        "--prefix",
+        str(prefix),
+        DSTUI_PREFIX=str(short / "ignored"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert_installed(prefix)
+    assert not (short / "ignored").exists()
+
+
+@pytest.mark.parametrize("args", [["--target", "/opt/dstui"], ["--bogus"], ["--prefix"]])
+def test_startup_rejects_an_unknown_or_incomplete_option(
+    args: list[str], tmp_path: Path, short: Path
+) -> None:
+    """--target belongs to makeself (it keeps the raw payload there), so it is not ours."""
+    result = run_startup(
+        make_extraction_dir(tmp_path), tmp_path, *args, DSTUI_PREFIX=str(short / "prefix")
+    )
+
+    assert result.returncode == 2
+    assert "Usage: sh dstui-install.sh [-- --prefix DIR]" in result.stderr
+    assert not (short / "prefix").exists()
+
+
+def test_startup_says_that_deepseek_harness_is_a_separate_install(
+    tmp_path: Path, short: Path
+) -> None:
+    result = run_startup(
+        make_extraction_dir(tmp_path), tmp_path, DSTUI_PREFIX=str(short / "prefix")
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "DeepSeek Harness (dsh)" in result.stdout
+    assert "npm install -g @deepseek-ai/dsh" in result.stdout
+    assert "Node.js >= 22.19" in result.stdout
+
+
+def test_startup_refuses_a_prefix_whose_shebang_is_too_long(tmp_path: Path) -> None:
+    prefix = tmp_path / ("p" * 120)
+
+    result = run_startup(make_extraction_dir(tmp_path), tmp_path, DSTUI_PREFIX=str(prefix))
+
+    assert result.returncode == 1
+    assert "install path too long" in result.stderr
+    assert "DSTUI_PREFIX" in result.stderr
+    assert list(prefix.iterdir()) == []  # refused before anything was unpacked
+
+
+@pytest.mark.parametrize("blank", [" ", "\t", "\n"], ids=["space", "tab", "newline"])
+def test_startup_refuses_a_prefix_with_whitespace(blank: str, tmp_path: Path, short: Path) -> None:
+    """The kernel splits a shebang at whitespace: the launcher could never start."""
+    prefix = short / f"my{blank}tools"
+
+    result = run_startup(make_extraction_dir(tmp_path), tmp_path, DSTUI_PREFIX=str(prefix))
+
+    assert result.returncode == 1
+    assert "whitespace" in result.stderr
+    assert list(prefix.iterdir()) == []  # refused before anything was unpacked
+
+
+@pytest.mark.parametrize("how", ["env", "option"])
+def test_startup_resolves_a_relative_prefix_against_the_callers_directory(
+    how: str, tmp_path: Path, short: Path
+) -> None:
+    """makeself runs startup.sh inside its temp dir and deletes it afterwards; the caller's
+    directory is $USER_PWD."""
+    caller = short / "caller"
+    caller.mkdir()
+    args, env = (
+        (["--prefix", "rel/pfx"], {}) if how == "option" else ([], {"DSTUI_PREFIX": "rel/pfx"})
+    )
+
+    result = run_startup(
+        make_extraction_dir(tmp_path), tmp_path, *args, USER_PWD=str(caller), **env
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert_installed(caller / "rel" / "pfx")
+    assert not (tmp_path / "extracted" / "rel").exists()
+
+
+def test_startup_expands_a_quoted_tilde_prefix(tmp_path: Path, short: Path) -> None:
+    home = short / "home"
+
+    result = run_startup(
+        make_extraction_dir(tmp_path), tmp_path, HOME=str(home), DSTUI_PREFIX="~/apps"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert_installed(home / "apps")
+
+
+def test_startup_installs_a_tree_everyone_can_use_but_only_the_owner_can_write(
+    tmp_path: Path, short: Path
+) -> None:
+    """Under makeself's umask 077, from an archive with group-writable modes."""
+    prefix = short / "prefix"
+
+    result = run_startup(make_extraction_dir(tmp_path), tmp_path, DSTUI_PREFIX=str(prefix))
+
+    assert result.returncode == 0, result.stderr
+    assert_usable_by_everyone_writable_only_by_owner(prefix)
+
+
+def userns_available(*flags: str) -> bool:
+    if UNSHARE is None:
+        return False
+    probe = subprocess.run(
+        [UNSHARE, "--user", "--map-root-user", *flags, "true"], capture_output=True, check=False
+    )
+    return probe.returncode == 0
+
+
+@pytest.mark.skipif(not userns_available(), reason="needs unprivileged user namespaces")
+def test_startup_as_root_gives_the_tree_to_root_not_to_the_archived_owner(
+    tmp_path: Path, short: Path
+) -> None:
+    """As root, tar would restore the archive's owner (uid 4242, unmapped in the namespace, so
+    chown fails) and its group-writable modes."""
+    prefix = short / "prefix"
+
+    result = run_startup(
+        make_extraction_dir(tmp_path),
+        tmp_path,
+        wrap=(str(UNSHARE), "--user", "--map-root-user"),
+        DSTUI_PREFIX=str(prefix),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert_installed(prefix)
+    assert {p.lstat().st_uid for p in [prefix, *prefix.rglob("*")]} == {os.getuid()}
+    assert_usable_by_everyone_writable_only_by_owner(prefix)
+
+
+@pytest.mark.skipif(not userns_available("--mount"), reason="needs user + mount namespaces")
+def test_startup_works_when_the_extraction_dir_is_mounted_noexec(
+    tmp_path: Path, short: Path
+) -> None:
+    """CIS-hardened hosts mount /var/tmp (makeself's TMPDIR) noexec: nothing may be executed
+    from there, neither startup.sh nor the bundled zstd."""
+    here, noexec, prefix = make_extraction_dir(tmp_path), tmp_path / "noexec", short / "prefix"
+    noexec.mkdir()
+    script = (
+        'mount -t tmpfs -o noexec,mode=0700 tmpfs "$1" && cp -p "$2"/* "$1"/ && cd "$1" '
+        "&& umask 077 && exec sh ./startup.sh"
+    )
+    command = [str(UNSHARE), "--user", "--map-root-user", "--mount", "sh", "-c", script]
+    env = {"HOME": str(tmp_path / "home"), "PATH": SYSTEM_PATH, "DSTUI_PREFIX": str(prefix)}
+
+    result = run_script([*command, "sh", str(noexec), str(here)], env)
+
+    assert result.returncode == 0, result.stderr
+    assert_installed(prefix)
+
+
+def test_startup_refuses_an_interpreter_that_cannot_run_here_and_keeps_the_old_install(
+    tmp_path: Path, short: Path
+) -> None:
+    """E.g. a musl host (the bundled CPython needs glibc) or a noexec prefix."""
+    prefix = short / "prefix"
+    old = prefix / "lib" / "dstui" / "bin" / "dstui"
+    write_program(old, "echo old\n")
+    here = make_extraction_dir(tmp_path, python="exit 127\n")
+
+    result = run_startup(here, tmp_path, DSTUI_PREFIX=str(prefix))
+
+    assert result.returncode == 1
+    assert "cannot run on this host" in result.stderr
+    assert old.read_text() == "#!/bin/sh\necho old\n"
+    assert [p.name for p in prefix.iterdir()] == ["lib"]  # no stage left, nothing added
+
+
+# --------------------------------------------------------------------------- check-no-runtime
+
+
+def run_check(*trees: Path) -> subprocess.CompletedProcess[str]:
+    return run_script(["bash", str(CHECK_NO_RUNTIME), *map(str, trees)], {"PATH": SYSTEM_PATH})
+
+
+def test_check_no_runtime_accepts_a_clean_tree(tmp_path: Path) -> None:
+    for name in ("bin/dstui", "lib/python3.14/site-packages/deepseek_harness/client.pyc"):
+        write_program(tmp_path / "tree" / name, "true\n")
+
+    result = run_check(tmp_path / "tree")
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("offender", "reported"),
+    [
+        ("sp/deepseek_harness_runtime/__init__.pyc", "sp/deepseek_harness_runtime"),
+        (
+            "sp/deepseek_harness_runtime_bin-0.1.5rc1.dist-info/RECORD",
+            "sp/deepseek_harness_runtime_bin-0.1.5rc1.dist-info",
+        ),
+        ("bin/dsh", "bin/dsh"),
+        ("lib/node_modules/@deepseek-ai/dsh/lib/bin.js", "lib/node_modules"),
+        ("lib/addon.node", "lib/addon.node"),
+        ("bin/node", "bin/node"),
+        ("lib/renamed", "lib/renamed"),  # a Node single executable, found by its fuse
+    ],
+)
+def test_check_no_runtime_rejects_the_runtime_and_anything_node(
+    offender: str, reported: str, tmp_path: Path
+) -> None:
+    clean, tree = tmp_path / "clean", tmp_path / "tree"
+    write_program(clean / "bin" / "dstui", "true\n")
+    path = tree / offender
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\x7fELF\0" + NODE_SEA_FUSE + b":0\0" if offender == "lib/renamed" else b"x")
+
+    result = run_check(clean, tree)
+
+    assert result.returncode == 1
+    lines = result.stderr.splitlines()
+    assert f"  {tree / reported}" in lines
+    assert not any(str(clean) in line for line in lines)
+
+
+# --------------------------------------------------------------------------- verify-versions
+
+
+def load_verify_versions(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    """The script as the bundle's interpreter runs it: without `packaging` (it is not bundled)."""
+    for name in ("packaging", "packaging.version"):
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)  # no __pycache__ in tools/package
+    spec = importlib.util.spec_from_file_location("verify_versions", VERIFY_VERSIONS)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("1.0", "1.0.0"),
+        ("0.1.5rc1", "0.1.5.rc1"),
+        ("2.0.0-rc.2", "2.0.0rc2"),
+        ("2026.06.17", "2026.6.17"),
+        ("1.0a1", "1.0alpha1"),
+        ("1.0b2", "1.0-beta.2"),
+        ("1.0c1", "1.0rc1"),
+        ("1.0pre1", "1.0rc1"),
+        ("1.0-1", "1.0.post1"),
+        ("1.0.rev2", "1.0post2"),
+        ("1.0.dev0", "1.0dev"),
+        ("v1.0", "1.0"),
+        ("1.0+Local.01", "1.0+local-1"),
+        ("0!1.0", "1.0"),
+        (" 8.2.8 ", "8.2.8"),
+    ],
+)
+def test_verify_versions_treats_pep440_equal_versions_as_equal(
+    a: str, b: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ver_eq = load_verify_versions(monkeypatch)._ver_eq
+
+    assert ver_eq(a, b)
+    assert ver_eq(b, a)
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        ("1.0", "1.0.1"),
+        ("1.0rc1", "1.0"),
+        ("1.0rc1", "1.0rc2"),
+        ("1.0a1", "1.0b1"),
+        ("1.0", "1.0.post0"),
+        ("1.0", "1.0.dev0"),
+        ("1!1.0", "1.0"),
+        ("1.0+a", "1.0"),
+        ("not-a-version", "not-a-version-2"),
+    ],
+)
+def test_verify_versions_keeps_different_versions_apart(
+    a: str, b: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ver_eq = load_verify_versions(monkeypatch)._ver_eq
+
+    assert not ver_eq(a, b)
+    assert not ver_eq(b, a)

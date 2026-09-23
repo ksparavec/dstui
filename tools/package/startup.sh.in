@@ -2,62 +2,112 @@
 # #!/bin/sh + DSTUI_VERSION= + PYVER=).
 #
 # makeself (built with --nox11 --nocomp) extracts this dir to a temp location and
-# runs this script from there. The dir contains:
+# runs this script from there, as `sh ./startup.sh` (never exec'd directly: the
+# temp dir may be mounted noexec). The dir contains:
 #   ./zstd            a bundled STATIC zstd (so the target needs no zstd)
 #   ./bundle.tar.zst  the zstd-compressed CPython + dstui + deps tree
 #
 # We decompress with the bundled zstd, then lay the tree into an install prefix
 # and expose `dstui`. Install prefix resolution (highest first):
-#   1. `--target DIR`  (pass as: sh dstui-install.sh -- --target DIR)
+#   1. `--prefix DIR`  (pass as: sh dstui-install.sh -- --prefix DIR)
 #   2. $DSTUI_PREFIX
 #   3. $HOME/.local
+# (`--target` is makeself's own option: it keeps the raw payload in DIR.)
 #
 # DeepSeek Harness (`dsh`, npm @deepseek-ai/dsh) is NOT in the bundle: it is a
 # separate install, and dstui finds it on PATH (or via --dsh-bin).
 set -eu
 
+# makeself runs us under umask 077. The installed tree is software for every user
+# of the prefix (e.g. /usr/local): readable and runnable by all, writable by the
+# installing user only.
+umask 022
+
+usage() {
+  echo "Usage: sh dstui-install.sh [-- --prefix DIR]   (or set DSTUI_PREFIX)"
+}
+
 PREFIX="${DSTUI_PREFIX:-$HOME/.local}"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --target) PREFIX="$2"; shift 2 ;;
-    --target=*) PREFIX="${1#*=}"; shift ;;
+    --prefix)
+      if [ $# -lt 2 ]; then
+        echo "error: --prefix needs a directory" >&2; usage >&2; exit 2
+      fi
+      PREFIX="$2"; shift 2 ;;
+    --prefix=*) PREFIX="${1#*=}"; shift ;;
     -h|--help)
       echo "dstui ${DSTUI_VERSION} installer"
-      echo "Usage: sh dstui-install.sh [-- --target DIR]   (or set DSTUI_PREFIX)"
+      usage
       exit 0 ;;
-    *) shift ;;
+    *) echo "error: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
 done
+[ -n "$PREFIX" ] || { echo "error: empty install prefix" >&2; exit 2; }
+
+# makeself runs this script inside its temp dir and deletes that afterwards: a
+# relative prefix means the directory the installer was started from, which
+# makeself exports as $USER_PWD. A quoted ~ means $HOME.
+# shellcheck disable=SC2088  # a literal ~ is exactly what is matched here
+case "$PREFIX" in
+  /*) ;;
+  '~'|'~/'*) PREFIX="$HOME${PREFIX#\~}" ;;
+  *) PREFIX="${USER_PWD:-$PWD}/$PREFIX" ;;
+esac
 
 here="$(pwd)"                       # makeself extraction dir (zstd + bundle.tar.zst)
-chmod +x "$here/zstd" 2>/dev/null || true
 
-mkdir -p "$PREFIX"
+mkdir -p -- "$PREFIX"
 PREFIX="$(CDPATH= cd -- "$PREFIX" && pwd)"
 LIB="$PREFIX/lib/dstui"
 BINDIR="$PREFIX/bin"
 DOCDIR="$PREFIX/share/doc/dstui"
 
-# The bundled interpreter every console script resolves to. `-s` makes the bundle
-# hermetic (ignores the host user site). A shebang over the kernel's 127-byte
-# limit can't be exec'd, so fail fast on an over-long prefix — before anything
-# is unpacked or replaced.
+# The bundled interpreter every console script resolves to. `-I` (isolated mode)
+# makes the bundle hermetic: PYTHONPATH, PYTHONHOME and the other PYTHON*
+# variables, the user site and the script's directory never reach sys.path.
+# The kernel splits a shebang at whitespace and cannot exec one over 127 bytes,
+# so refuse such a prefix — before anything is unpacked or replaced.
 BUNDLE_PY="$LIB/bin/python$PYVER"
-shebang="#!$BUNDLE_PY -s"
+shebang="#!$BUNDLE_PY -I"
+tab="$(printf '\t')"
+nl='
+'
+case "$BUNDLE_PY" in
+  *" "*|*"$tab"*|*"$nl"*)
+    echo "error: install path '$PREFIX' contains whitespace, which a '#!' line cannot" >&2
+    echo "       carry. Re-run with DSTUI_PREFIX (or -- --prefix DIR) set to a path without it." >&2
+    exit 1 ;;
+esac
 if [ ${#shebang} -gt 127 ]; then
   echo "error: install path too long — shebang '$shebang' is ${#shebang} bytes" >&2
-  echo "       (kernel limit 127). Re-run with a shorter DSTUI_PREFIX/--target." >&2
+  echo "       (kernel limit 127). Re-run with a shorter DSTUI_PREFIX (or -- --prefix DIR)." >&2
   exit 1
 fi
 
 echo "Installing dstui ${DSTUI_VERSION} -> $PREFIX"
 
 # Decompress the heavy payload with the BUNDLED static zstd (target needs none).
-# Stage on the SAME filesystem as the target for a fast rename.
+# Stage on the SAME filesystem as the target for a fast rename, and run zstd from
+# there too: makeself's temp dir may be mounted noexec.
 stage="$PREFIX/.dstui-install.$$"
 rm -rf "$stage"; mkdir -p "$stage"
 trap 'rm -rf "$stage"' EXIT INT TERM
-"$here/zstd" -dc "$here/bundle.tar.zst" | tar -xf - -C "$stage"   # -> stage/python, stage/doc
+cp "$here/zstd" "$stage/.zstd"
+chmod 700 "$stage/.zstd"
+# --no-same-owner: as root, tar would otherwise restore the archive's owner.
+"$stage/.zstd" -dc "$here/bundle.tar.zst" | tar --no-same-owner -xf - -C "$stage"   # -> stage/python, stage/doc
+rm -f "$stage/.zstd"
+# Whoever installs owns the tree (root included); everyone may read and run it.
+chmod -R u+rwX,go+rX,go-w "$stage"
+
+# Before anything is replaced: the bundled interpreter must run on this host
+# (x86-64 glibc >= 2.17, and a prefix that is not mounted noexec).
+if ! "$stage/python/bin/python$PYVER" -I -c 'import dstui' >/dev/null 2>&1; then
+  echo "error: the bundled Python cannot run on this host. It needs Linux x86-64 with" >&2
+  echo "       glibc >= 2.17 (not musl), and a prefix that is not mounted noexec." >&2
+  exit 1
+fi
 
 mkdir -p "$BINDIR" "$PREFIX/lib" "$PREFIX/share/doc"
 rm -rf "$LIB"; mv "$stage/python" "$LIB"
