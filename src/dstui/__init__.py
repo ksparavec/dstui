@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import sys
 from collections.abc import Sequence
@@ -9,7 +10,7 @@ from pathlib import Path
 
 from dstui.app import DsTuiApp
 from dstui.bridge import AgentBridge
-from dstui.config import build_harness_config, parse_args
+from dstui.config import DshNotFoundError, build_harness_config, parse_args, resolve_dsh_bin
 
 __all__ = ["main"]
 
@@ -20,6 +21,11 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the TUI with settings from ``argv`` (``sys.argv[1:]`` if None); return the exit code."""
     settings = parse_args(argv)
+    try:
+        settings = dataclasses.replace(settings, dsh_bin=resolve_dsh_bin(settings.dsh_bin))
+    except DshNotFoundError as error:
+        sys.stderr.write(f"dstui: {error}\n")
+        return 1
     try:
         config = build_harness_config(settings)
         log_handler = _warnings_log(settings.data_dir / _LOG_FILE)

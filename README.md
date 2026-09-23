@@ -5,22 +5,26 @@ agent, built with [Textual](https://textual.textualize.io/) on the official Pyth
 
 You type a prompt. The agent answers, and its reasoning and tool calls appear as collapsible
 blocks. The status bar shows what the agent is doing, the model and profile, and the token
-totals. dstui drives the SDK's bundled runtime process. It has no server or state of its own
-beyond a data directory.
+totals. dstui drives a DeepSeek Harness runtime process (`dsh`), which you install separately.
+It has no server or state of its own beyond a data directory.
 
 ## Requirements
 
+- **DeepSeek Harness, installed separately:** `npm install -g @deepseek-ai/dsh` (needs
+  Node.js >= 22.19). dstui does not bundle it. It runs, in this order: the `--dsh-bin`
+  executable, else `dsh` from `PATH`, else the SDK's embedded runtime if that is installed
+  (only development and test installs have it). Without any of them dstui exits with
+  `DeepSeek Harness (dsh) not found`.
 - [uv](https://docs.astral.sh/uv/). It installs Python 3.14 and every dependency.
 - A DeepSeek API key in `DEEPSEEK_API_KEY`. `DEEPSEEK_BASE_URL` is optional and points the
   agent at a different endpoint. Not used with another provider (see
   [Other providers](#other-providers)).
-- Only Linux x86_64 has been tested. The runtime wheel also exists for Linux arm64, macOS and
-  Windows.
+- Only Linux x86_64 has been tested.
 
 The SDK comes from PyPI, following the official DeepSeek Harness install instructions
 (`pip install deepseek-harness-sdk`). dstui pins `deepseek-harness-sdk==0.1.5rc1`, the latest
-published release. That package pulls in the matching `deepseek-harness-runtime-bin` wheel,
-which contains the runtime, so Node.js and a source checkout are not needed.
+published release. That package depends on `deepseek-harness-runtime-bin`, a 275 MB wheel with
+an embedded runtime. dstui uses it only for its own tests and never ships it.
 
 ## Install and run
 
@@ -45,7 +49,7 @@ key the app still starts: it shows a warning, and each prompt then ends with a
 | `--effort {off,low,high,max}` | runtime default (`high`) | Reasoning effort. |
 | `--max-tokens N` | runtime default | The maximum number of output tokens per model request. |
 | `--data-dir PATH` | see [Data](#data) | Where dstui keeps its state. |
-| `--dsh-bin PATH` | the SDK's bundled runtime | Run this DeepSeek Harness executable instead, e.g. an npm-installed `dsh`. |
+| `--dsh-bin PATH` | `dsh` on `PATH` | The DeepSeek Harness executable to run (see [Requirements](#requirements)). |
 | `--patch PATH` | none | An extra runtime patch file, applied after dstui's own. Repeatable; applied in order. |
 | `--version`, `-h` / `--help` | | Print the version or the help text. |
 
@@ -106,7 +110,7 @@ the runtime, so `apiKeyEnv` must name another variable. The `sdk` profile's `web
 calls DeepSeek's search API with that key, so it then fails with `no API key` instead of
 sending your queries to DeepSeek.
 
-`--dsh-bin` runs another DeepSeek Harness executable than the SDK's bundled one, for example a
+`--dsh-bin` runs another DeepSeek Harness executable than the `dsh` on `PATH`, for example a
 different `dsh` version. dstui still runs it with `DSH_HOME` set to `<data dir>/dsh-home`, so
 configuration kept in `~/.dsh` is not read: declare providers with `--patch`.
 

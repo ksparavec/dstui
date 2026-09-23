@@ -20,6 +20,12 @@ from dstui.app import DsTuiApp
 from dstui.bridge import AgentBridge
 from dstui.config import build_harness_config, parse_args
 from tests.conftest import runtime_pids_under
+from tests.helpers_dsh import (
+    DSH_NOT_FOUND,
+    empty_search_path,
+    put_on_path,
+    set_runtime_importable,
+)
 
 CLI_TIMEOUT_S = 60.0
 CONSOLE_SCRIPT = Path(sys.executable).with_name("dstui")
@@ -66,6 +72,12 @@ class SpyBridge(AgentBridge):
     def close(self) -> None:
         self.closed += 1
         super().close()
+
+
+@pytest.fixture(autouse=True)
+def search_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """PATH without ``dsh``, so main() uses the SDK's embedded runtime (the dev extra's)."""
+    return empty_search_path(tmp_path / "path-bin", monkeypatch)
 
 
 @pytest.fixture
@@ -297,3 +309,70 @@ def test_console_script_rejects_bad_arguments(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "must be a positive integer" in result.stderr
+
+
+def test_main_runs_the_dsh_found_on_path(
+    tmp_path: Path,
+    search_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spy_bridge: type[SpyBridge],
+) -> None:
+    dsh = put_on_path(search_path)
+    spy = install_run_spy(monkeypatch, RunSpy())
+
+    assert dstui.main(cli_args(tmp_path)) == 0
+
+    [app] = spy.apps
+    assert app.settings.dsh_bin == dsh
+    [bridge] = spy_bridge.instances
+    assert bridge.config.dsh_bin == str(dsh)
+
+
+def test_main_runs_the_given_dsh_bin_even_without_the_embedded_runtime(
+    tmp_path: Path,
+    search_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spy_bridge: type[SpyBridge],
+) -> None:
+    put_on_path(search_path)
+    given = put_on_path(tmp_path, "my-dsh")
+    set_runtime_importable(monkeypatch, False)
+    install_run_spy(monkeypatch, RunSpy())
+
+    assert dstui.main(cli_args(tmp_path, "--dsh-bin", str(given))) == 0
+
+    [bridge] = spy_bridge.instances
+    assert bridge.config.dsh_bin == str(given)
+
+
+def test_main_uses_the_embedded_runtime_when_no_dsh_is_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spy_bridge: type[SpyBridge]
+) -> None:
+    set_runtime_importable(monkeypatch, True)
+    install_run_spy(monkeypatch, RunSpy())
+
+    assert dstui.main(cli_args(tmp_path)) == 0
+
+    [bridge] = spy_bridge.instances
+    assert bridge.config.dsh_bin is None  # the SDK launches deepseek_harness_runtime's
+
+
+def test_main_exits_1_before_the_app_starts_when_no_dsh_is_found(
+    tmp_path: Path,
+    search_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    spy_bridge: type[SpyBridge],
+) -> None:
+    put_on_path(search_path, "dsh", executable=False)
+    set_runtime_importable(monkeypatch, False)
+    spy = install_run_spy(monkeypatch, RunSpy())
+
+    code = dstui.main(cli_args(tmp_path))
+
+    assert code == 1
+    assert capsys.readouterr().err == f"dstui: {DSH_NOT_FOUND}\n"
+    assert spy.apps == []
+    assert spy_bridge.instances == []
+    assert not (tmp_path / "data").exists()  # nothing is created for a run that cannot start
+    assert dstui_file_handlers() == []
