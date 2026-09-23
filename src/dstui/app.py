@@ -132,7 +132,7 @@ class DsTuiApp(App[None]):
     async def on_mount(self) -> None:
         self.chat.anchor()
         self._show_phase("starting…")
-        if not self.settings.api_key_set:
+        if self.settings.needs_deepseek_key and not self.settings.api_key_set:
             await self._notice(API_KEY_MISSING, "warning")
         self.set_interval(STATUS_TICK_S, self._refresh_status)
         self.prompt.focus()

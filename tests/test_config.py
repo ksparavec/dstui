@@ -393,12 +393,78 @@ def test_parse_args_help_documents_options_defaults_and_the_api_key(
 
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
-    for option in ("--workspace", "--profile", "--model", "--effort", "--max-tokens", "--data-dir"):
+    for option in (
+        "--workspace", "--profile", "--provider", "--model", "--effort", "--max-tokens",
+        "--data-dir", "--dsh-bin", "--patch",
+    ):  # fmt: skip
         assert option in out
     assert f"default: {data_dir}" in out
     assert "DEEPSEEK_API_KEY" in out
     assert "sdk = file writes sandboxed to the workspace" in out  # the risk of each profile
     assert "sdk-minimal = NO sandbox (default: sdk)" in out
+
+
+@pytest.fixture
+def patch_files(tmp_path: Path) -> tuple[Path, Path]:
+    first, second = tmp_path / "a.yml", tmp_path / "b.yml"
+    first.write_text("[]\n", encoding="utf-8")
+    second.write_text("[]\n", encoding="utf-8")
+    return first, second
+
+
+def test_parse_args_accepts_another_provider_with_a_free_model_id(
+    workspace: Path, home_env: dict[str, str], tmp_path: Path, patch_files: tuple[Path, Path]
+) -> None:
+    dsh = tmp_path / "dsh"
+    dsh.write_text("#!/bin/sh\n", encoding="utf-8")
+    argv = [
+        "-w", str(workspace),
+        "--provider", "router-vllm",
+        "-m", "Qwen3-8B-NVFP4::nothink@32768",
+        "--dsh-bin", str(dsh),
+        "--patch", str(patch_files[0]),
+        "--patch", str(patch_files[1]),
+    ]  # fmt: skip
+
+    settings = parse_args(argv, env=home_env)
+
+    assert settings.provider == "router-vllm"
+    assert settings.model == "Qwen3-8B-NVFP4::nothink@32768"
+    assert settings.dsh_bin == dsh
+    assert settings.extra_patches == patch_files  # order kept
+    assert settings.needs_deepseek_key is False
+
+
+def test_parse_args_requires_a_model_for_another_provider(
+    workspace: Path, home_env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    err = _parse_error(["-w", str(workspace), "--provider", "router-vllm"], home_env, capsys)
+
+    assert "required with --provider router-vllm" in err
+
+
+def test_parse_args_default_provider_needs_the_deepseek_key(
+    workspace: Path, home_env: dict[str, str]
+) -> None:
+    settings = parse_args(["-w", str(workspace)], env=home_env)
+
+    assert settings.provider == "deepseek-official"
+    assert settings.needs_deepseek_key is True
+    assert settings.dsh_bin is None
+    assert settings.extra_patches == ()
+
+
+@pytest.mark.parametrize("option", ["--dsh-bin", "--patch"])
+def test_parse_args_rejects_a_missing_file(
+    option: str,
+    workspace: Path,
+    home_env: dict[str, str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    err = _parse_error(["-w", str(workspace), option, str(tmp_path / "nope")], home_env, capsys)
+
+    assert f"{tmp_path / 'nope'} is not a file" in err
 
 
 # ----------------------------------------------------------------------- build_harness_config
@@ -473,6 +539,23 @@ def test_build_harness_config_returns_exactly_the_specified_fields(
     assert config == _expected_config(configured)
     assert config.api_key is None
     assert config.base_url is None
+
+
+def test_build_harness_config_passes_provider_dsh_bin_and_extra_patches(
+    settings: Settings, tmp_path: Path
+) -> None:
+    extra = (tmp_path / "a.yml", tmp_path / "b.yml")
+    configured = dataclasses.replace(
+        settings, provider="router-ollama", model="qwen3:8b",
+        dsh_bin=tmp_path / "dsh", extra_patches=extra,
+    )  # fmt: skip
+
+    config = build_harness_config(configured)
+
+    assert config.provider == "router-ollama"
+    assert config.model == "qwen3:8b"
+    assert config.dsh_bin == str(tmp_path / "dsh")
+    assert config.patches == (str(configured.patch_file), *(str(p) for p in extra))
 
 
 def test_build_harness_config_is_idempotent(settings: Settings) -> None:

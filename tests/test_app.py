@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import threading
 import time
@@ -44,6 +45,7 @@ from tests.helpers_app import (
     FakeClock,
     assert_off_loop,
     make_app,
+    make_settings,
     ready_app,
     submit,
 )
@@ -106,6 +108,18 @@ async def test_warns_at_startup_when_api_key_is_missing(tmp_path: Path, api_key_
             assert len(warnings) == 1
             assert "DEEPSEEK_API_KEY" in warnings[0]
             assert "not set" in warnings[0]
+
+
+async def test_no_api_key_warning_for_another_provider(tmp_path: Path) -> None:
+    """DEEPSEEK_API_KEY is only read by DeepSeek's own provider."""
+    backend = FakeBackend()
+    settings = dataclasses.replace(
+        make_settings(tmp_path, api_key_set=False), provider="router-ollama", model="qwen3:8b"
+    )
+    app = DsTuiApp(backend, settings)
+    async with app.run_test(size=SIZE) as pilot:
+        await wait_until(pilot, lambda: status(app).startswith("ready"))
+        assert notices(app, "warning") == []
 
 
 async def test_start_failure_shows_error_notice_and_app_stays_usable(tmp_path: Path) -> None:
