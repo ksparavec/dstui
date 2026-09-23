@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
+import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +24,17 @@ DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_PROVIDER = "deepseek-official"
 # Runtime patch disabling the per-request session log (JSON is valid YAML).
 _SESSION_LOG_PATCH = '[{"id":"session-log-deepseek","config":{"enabled":false}}]\n'
+# The SDK's embedded runtime (deepseek-harness-runtime-bin): installed by the dev extra for the
+# tests, never by dstui's installer, which relies on a separately installed `dsh`.
+_EMBEDDED_RUNTIME = "deepseek_harness_runtime"
+_DSH_NOT_FOUND = (
+    "DeepSeek Harness (dsh) not found: install @deepseek-ai/dsh (npm, Node >= 22.19) "
+    "or pass --dsh-bin PATH"
+)
+
+
+class DshNotFoundError(LookupError):
+    """No runtime to launch: no --dsh-bin, no ``dsh`` on PATH and no embedded runtime."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +47,7 @@ class Settings:
     max_tokens: int | None = None  # None -> runtime default
     api_key_set: bool = False  # DEEPSEEK_API_KEY present and non-empty
     provider: str = DEFAULT_PROVIDER
-    dsh_bin: Path | None = None  # None -> the SDK's bundled runtime
+    dsh_bin: Path | None = None  # None -> the SDK's embedded runtime (see resolve_dsh_bin)
     extra_patches: tuple[Path, ...] = ()  # applied after dstui's own patch, in order
 
     @property
@@ -177,7 +190,7 @@ def _add_runtime_options(parser: argparse.ArgumentParser, default_data: Path) ->
         type=_existing_file,
         default=None,
         metavar="PATH",
-        help="run this DeepSeek Harness executable instead of the SDK's bundled runtime",
+        help="the DeepSeek Harness executable to run (default: dsh on PATH)",
     )
     parser.add_argument(
         "--patch",
@@ -233,6 +246,18 @@ def _existing_dir(value: str) -> Path:
     if not path.is_dir():
         raise argparse.ArgumentTypeError(f"{path} is not a directory")
     return path
+
+
+def resolve_dsh_bin(dsh_bin: Path | None) -> Path | None:
+    """The runtime to launch: ``dsh_bin``, else ``dsh`` on PATH, else None for the SDK's
+    embedded runtime if that is installed. Raises DshNotFoundError when there is none."""
+    if dsh_bin is not None:
+        return dsh_bin
+    if found := shutil.which("dsh"):
+        return Path(found)
+    if importlib.util.find_spec(_EMBEDDED_RUNTIME) is not None:
+        return None
+    raise DshNotFoundError(_DSH_NOT_FOUND)
 
 
 def build_harness_config(settings: Settings) -> DeepSeekHarnessConfig:

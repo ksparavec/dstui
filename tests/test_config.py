@@ -17,10 +17,18 @@ import dstui.config
 from dstui.config import (
     DEFAULT_MODEL,
     DEFAULT_PROFILE,
+    DshNotFoundError,
     Settings,
     build_harness_config,
     default_data_dir,
     parse_args,
+    resolve_dsh_bin,
+)
+from tests.helpers_dsh import (
+    DSH_NOT_FOUND,
+    empty_search_path,
+    put_on_path,
+    set_runtime_importable,
 )
 
 SESSION_LOG_PATCH = [{"id": "session-log-deepseek", "config": {"enabled": False}}]
@@ -575,3 +583,54 @@ def test_build_harness_config_is_idempotent(settings: Settings) -> None:
 
     assert second == first
     assert json.loads(settings.patch_file.read_text(encoding="utf-8")) == SESSION_LOG_PATCH
+
+
+# ---------------------------------------------------------------------------- resolve_dsh_bin
+
+
+@pytest.fixture
+def search_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return empty_search_path(tmp_path / "path-bin", monkeypatch)
+
+
+@pytest.mark.parametrize("importable", [True, False], ids=["runtime", "no-runtime"])
+def test_resolve_dsh_bin_prefers_the_given_executable(
+    importable: bool, search_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_on_path(search_path)
+    set_runtime_importable(monkeypatch, importable)
+    given = tmp_path / "my-dsh"
+
+    assert resolve_dsh_bin(given) == given
+
+
+@pytest.mark.parametrize("importable", [True, False], ids=["runtime", "no-runtime"])
+def test_resolve_dsh_bin_uses_dsh_on_path(
+    importable: bool, search_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dsh = put_on_path(search_path)
+    set_runtime_importable(monkeypatch, importable)
+
+    assert resolve_dsh_bin(None) == dsh
+
+
+def test_resolve_dsh_bin_falls_back_to_the_sdks_embedded_runtime(
+    search_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_on_path(search_path, "not-dsh")
+    put_on_path(search_path, "dsh", executable=False)  # which() skips it, as a shell would
+    set_runtime_importable(monkeypatch, True)
+
+    assert resolve_dsh_bin(None) is None  # None: the SDK launches its embedded runtime
+
+
+def test_resolve_dsh_bin_raises_when_there_is_no_runtime_at_all(
+    search_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_on_path(search_path, "dsh", executable=False)
+    set_runtime_importable(monkeypatch, False)
+
+    with pytest.raises(DshNotFoundError) as raised:
+        resolve_dsh_bin(None)
+
+    assert str(raised.value) == DSH_NOT_FOUND
