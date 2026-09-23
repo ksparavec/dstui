@@ -228,22 +228,16 @@ make help                               # every target
 ```
 
 The tests never contact api.deepseek.com and need no API key. The `e2e` tests start a real
-runtime and point it at a local fake DeepSeek API (`tests/fake_deepseek.py`). With no
-separately installed `dsh` they use the SDK's embedded runtime, which only the `[dev]` extra
-installs (`deepseek-harness-runtime-bin`). One of them runs `python -m dstui` in a
+runtime and point it at a local fake DeepSeek API (`tests/fake_deepseek.py`). They always use
+the SDK's embedded runtime, which only the `[dev]` extra installs
+(`deepseek-harness-runtime-bin`); a separately installed `dsh` is never used by the tests. One of them runs `python -m dstui` in a
 pseudo-terminal and types into it (`tests/test_pty.py`). A test that leaves a runtime process
 running fails.
 
-**Never `/tmp`.** `make test` and `make test-cov` give pytest a private `TMPDIR` and
-`--basetemp` under `/var/tmp` and delete both afterwards, pass or fail: a full run leaves about
-100k files, and the runtime leaves its own scratch directories in `$TMPDIR`. Running pytest
-directly, do the same:
-
-```sh
-export TMPDIR=/var/tmp/dstui-$USER-tmp && mkdir -p "$TMPDIR"
-uv run pytest --basetemp=/var/tmp/dstui-$USER-pytest -m "not e2e"
-rm -rf /var/tmp/dstui-$USER-pytest "$TMPDIR"
-```
+**Never `/tmp`.** The suite keeps every temp file under `/var/tmp` and removes it when the run
+ends, pass or fail (`tests/tmp_hygiene.py`): a full run creates about 100k files, and the
+runtime and other child processes inherit its private `TMPDIR`. So plain `uv run pytest` or
+`make test` is enough.
 
 `requirements.txt`, `requirements-dev.txt` and `requirements-build.txt` (from `make lock`) are
 the locks, fully hashed: what the installer bundles, what `make dev-install` and CI install, and
