@@ -6,7 +6,8 @@ e2e run creates about 100k files. So each run gets a private directory
 ``TMPDIR`` of this process and its children: the runtime, ``python -m dstui``, the agent's shell.
 The directory is removed when the session ends, pass or fail. Directories of killed runs (dead
 pid) are removed when the next run starts; those of live, concurrent runs are left alone. An
-explicit ``--basetemp`` becomes the run directory instead (pytest treats it as disposable too).
+explicit ``--basetemp`` becomes the run directory instead (pytest treats it as disposable too); as
+with pytest, it must not be a symlink and its parent must exist.
 
 No project imports, so a test can load it on its own: ``pytest -p tests.tmp_hygiene``.
 """
@@ -63,16 +64,16 @@ def sweep_stale_run_dirs(base: Path = BASE_DIR) -> list[Path]:
 def _make_run_dir(given_basetemp: str | None) -> Path:
     if given_basetemp is None:
         return Path(tempfile.mkdtemp(prefix=f"{PREFIX}{os.getpid()}-", dir=BASE_DIR))
-    run_dir = Path(given_basetemp).resolve()
-    _rm_rf(run_dir)  # as pytest does with a given basetemp
-    run_dir.mkdir(mode=0o700, parents=True)
-    return run_dir
+    run_dir = Path(os.path.abspath(given_basetemp))  # not resolve(): a symlink's target isn't ours
+    _rm_rf(run_dir)  # as pytest does with a given basetemp; refuses a symlink
+    run_dir.mkdir(mode=0o700)  # no parents: they would be left behind
+    return run_dir.resolve()
 
 
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except ProcessLookupError, OverflowError:  # no such process, or not even a pid
         return False
     except PermissionError:  # alive, but another user's
         return True

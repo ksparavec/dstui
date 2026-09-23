@@ -243,6 +243,34 @@ def test_an_explicit_basetemp_becomes_the_run_dir_and_is_removed_too(tmp_path: P
     assert_kept_in_its_run_dir_and_removed(run)
 
 
+def test_a_symlinked_basetemp_fails_the_run_and_leaves_the_link_target_alone(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "not-test-output"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep")
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+
+    run = Probe(tmp_path).run("--basetemp", str(link))
+
+    assert run.returncode != 0, run.output
+    assert "symbolic link" in run.output
+    assert (target / "keep.txt").read_text() == "keep"
+    assert link.is_symlink()
+
+
+def test_a_basetemp_in_a_missing_dir_fails_the_run_and_leaves_nothing_behind(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing"
+
+    run = Probe(tmp_path).run("--basetemp", str(missing / "given"))
+
+    assert run.returncode != 0, run.output
+    assert not missing.exists()
+
+
 def test_two_concurrent_runs_both_pass_and_both_clean_up(tmp_path: Path) -> None:
     since = time.time() - 1
     barrier = tmp_path / "barrier"
@@ -319,6 +347,18 @@ def test_the_sweep_leaves_a_dead_runs_dir_of_another_user_alone(
 
     assert swept == []
     assert foreign.exists()
+
+
+def test_the_sweep_takes_a_pid_too_large_for_the_os_as_dead_instead_of_crashing(
+    tmp_path: Path,
+) -> None:
+    impossible = 2**31  # beyond pid_t: junk that anyone can leave in /var/tmp
+    stale = make_run_dir(tmp_path, impossible)
+    junk = tmp_path / f"{PREFIX}{impossible}-file"
+    junk.write_text("not a directory")
+
+    assert tmp_hygiene.sweep_stale_run_dirs(tmp_path) == [stale]
+    assert junk.exists()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can remove anything")
