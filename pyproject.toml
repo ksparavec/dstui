@@ -1,0 +1,51 @@
+[project]
+name = "dstui"
+version = "0.1.0"
+description = "Simple Textual TUI for chatting with a DeepSeek Harness agent"
+authors = [
+    { name = "Kresimir Sparavec", email = "ksparavec@devitops.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "deepseek-harness-sdk==0.1.5rc1",
+    "textual>=8.2.8",
+]
+
+[project.scripts]
+dstui = "dstui:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "e2e: drives the real DeepSeek Harness runtime against a fake local DeepSeek API",
+]
+
+[tool.coverage.run]
+source = ["dstui"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 90
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
