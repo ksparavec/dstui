@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-24
+
 ### Fixed
 - **`install.sh` no longer claims an HTTPS-only download it cannot enforce with
   wget.** Its `wget --https-only` only applies to recursive downloads, so it never
