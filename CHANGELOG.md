@@ -24,10 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (or your queries) to DeepSeek.
 - **Runs your DeepSeek Harness:** dstui launches `--dsh-bin PATH`, else `dsh`
   from `PATH` (empty and relative `PATH` entries are skipped), else the SDK's
-  embedded runtime when that is installed, which is the case for development
-  installs and for `pip install dstui`. The installer carries no runtime, so an
-  installed dstui exits with `DeepSeek Harness (dsh) not found` unless it gets
-  `--dsh-bin` or finds `dsh` on `PATH`. DeepSeek Harness is not part of dstui:
+  embedded runtime when that is installed, which only development and test
+  installs have. The installer carries no runtime, so an installed dstui exits
+  with `DeepSeek Harness (dsh) not found` unless it gets `--dsh-bin` or finds
+  `dsh` on `PATH`. DeepSeek Harness is not part of dstui:
   install it separately with `npm install -g @deepseek-ai/dsh` (Node.js >= 22.19).
 - **Private state:** everything lives in one data directory (`$DSTUI_HOME`,
   `$XDG_DATA_HOME/dstui` or `~/.local/share/dstui`) created with mode `0700`.
@@ -39,6 +39,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`DSTUI_PREFIX` picks the prefix, default `~/.local`, also for a system-wide
   install with `sudo`; `DSTUI_VERSION` pins a release). The installed files
   belong to whoever installs and are readable by every user, and the bundled
-  Python ignores `PYTHONPATH` and `PYTHONHOME`. It does not include DeepSeek
-  Harness.
+  Python (CPython 3.14.7, without the shared libpython) ignores `PYTHONPATH`
+  and `PYTHONHOME`. It does not include DeepSeek Harness. The installer is the
+  only distribution: dstui is not published to PyPI.
+- **Verifiable releases:** GitHub Actions builds every release and attests
+  `dstui-install.sh` and `install.sh` (build provenance). Check them with
+  `gh attestation verify FILE --repo ksparavec/dstui`, or let `install.sh` do
+  it before it runs the installer: `curl … | DSTUI_VERIFY=1 sh`. Without `gh`,
+  or if the check fails, nothing is run.
 

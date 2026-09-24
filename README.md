@@ -31,6 +31,31 @@ curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.s
 The installed files belong to whoever runs the installer (root for a system install), and
 every user can read and run them.
 
+The installer from the GitHub releases is the only way to install dstui: it is not published to
+PyPI (its package metadata carries the `Private :: Do Not Upload` classifier, which PyPI refuses).
+
+### Verify the download
+
+Every release is built by GitHub Actions, which also signs a
+[build provenance attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations)
+for both release files. With the [GitHub CLI](https://cli.github.com) (logged in), set
+`DSTUI_VERIFY=1` and `install.sh` checks the installer's attestation before it runs it. If the
+check fails, or `gh` is missing, it stops without running anything:
+
+```bash
+curl -fsSL https://github.com/ksparavec/dstui/releases/latest/download/install.sh | DSTUI_VERIFY=1 sh
+```
+
+That does not check `install.sh` itself. To check both files by hand:
+
+```bash
+curl -fsSLO https://github.com/ksparavec/dstui/releases/latest/download/install.sh
+curl -fsSLO https://github.com/ksparavec/dstui/releases/latest/download/dstui-install.sh
+gh attestation verify install.sh --repo ksparavec/dstui
+gh attestation verify dstui-install.sh --repo ksparavec/dstui
+sh dstui-install.sh
+```
+
 Then:
 
 ```bash
@@ -44,8 +69,8 @@ dstui -w ~/src/project -m deepseek-v4-pro --effort max
 - **DeepSeek Harness, installed separately:** `npm install -g @deepseek-ai/dsh` (needs
   Node.js >= 22.19). dstui does not bundle it. It runs, in this order: the `--dsh-bin`
   executable, else `dsh` from `PATH`, else the SDK's embedded runtime if that is installed
-  (development and test installs have it, and so does a `pip install` of dstui; the installer
-  does not). Without any of them dstui exits with `DeepSeek Harness (dsh) not found`.
+  (only development and test installs have it: `make dev-install`; the installer does not).
+  Without any of them dstui exits with `DeepSeek Harness (dsh) not found`.
 
   dstui starts that `dsh` as your user, outside the agent's sandbox. Empty and relative `PATH`
   entries are skipped, because they mean the current directory, by default the agent's
@@ -61,12 +86,12 @@ The SDK comes from PyPI, following the official DeepSeek Harness install instruc
 (`pip install deepseek-harness-sdk`). dstui pins `deepseek-harness-sdk==0.1.5rc1`, the latest
 published release. That package depends on `deepseek-harness-runtime-bin`, a 275 MB wheel with
 an embedded runtime. The installer leaves it out (it installs the SDK with `--no-deps`); dstui
-itself uses it only for its tests. A plain `pip install` of dstui still pulls it in through the
-SDK.
+itself uses it only for its tests, through the `[dev]` extra.
 
 ## Install from source
 
-With [uv](https://docs.astral.sh/uv/), which also installs Python 3.14:
+For development. With [uv](https://docs.astral.sh/uv/), which also installs Python 3.14.7, the
+exact version in `.python-version`:
 
 ```sh
 make dev-install                  # .venv with dstui (editable) and the locked development tools
@@ -258,8 +283,12 @@ Code layout (`src/dstui/`):
 ## Packaging
 
 `make package` produces `dist/dstui-install.sh`, a single **makeself** self-extracting,
-run-once installer (**linux-x86_64**, glibc, ~31 MB). It carries a relocatable CPython 3.14
-with dstui and every dependency, **sourceless-precompiled** (`.pyc` only). The tree is
+run-once installer (**linux-x86_64**, glibc, ~22 MB). It carries a relocatable CPython
+(exactly the X.Y.Z in `.python-version`, now 3.14.7; the build fails on any other) with dstui
+and every dependency, **sourceless-precompiled** (`.pyc` only). The interpreter has libpython
+linked in statically, so the shared `libpython3.14.so` (32 MB, only for programs that embed
+Python) is left out; the build fails if it, or any file that needs it, is in the bundle. The
+tree is
 **zstd -19** compressed and unpacked at install time by a **bundled static zstd**, so the target
 host needs neither Python nor zstd. makeself adds a **SHA256** integrity check. The launcher
 runs the bundled Python in isolated mode (`-I`), so `PYTHONPATH`, `PYTHONHOME`, the user site
@@ -288,7 +317,7 @@ dstui --help
 `--target DIR` (without `--`) is makeself's own option: it only unpacks the raw payload into
 `DIR`. Use `DSTUI_PREFIX` or `-- --prefix DIR`.
 
-Build deps: `uv`, `makeself`, `curl`, `readelf`, and a C toolchain (to build the static zstd
+Build deps: `uv`, `makeself`, `curl`, `readelf` (binutils), and a C toolchain (to build the static zstd
 once; it is cached under `.cache/`, per version). Run `make lock` and `make dev-install` first.
 The dstui wheel is built by the hash-pinned backend of `requirements-build.txt`, and the
 dependencies are installed as hash-checked wheels only. All temporary files go to a private
@@ -302,15 +331,26 @@ clear exit 1 without any `dsh`, and one real agent turn against the fake API thr
 
 ## Releasing
 
-Maintainers cut a release with `make release`. It reads the version from `pyproject.toml`,
-promotes the `CHANGELOG.md` `[Unreleased]` section to that version, rebuilds the installer, tags
-`vX.Y.Z`, pushes, and publishes a GitHub release with two assets: the `dstui-install.sh` bundle
-and the `install.sh` bootstrap behind the one-liner in the [Quick Start](#quick-start).
+Releases are built, attested and published by GitHub Actions
+(`.github/workflows/release.yml`), because artifact attestations can only be made there.
+Maintainers start one with `make release` (`tools/release/release.sh`). It reads the version
+from `pyproject.toml`, promotes the `CHANGELOG.md` `[Unreleased]` section to that version,
+commits `chore: release vX.Y.Z`, tags `vX.Y.Z` and pushes the commit and the tag together. It
+builds nothing and publishes nothing itself.
+
+The pushed tag starts the release workflow. It checks that the tag matches the version in
+`pyproject.toml`, builds the installer with `make dev-install` and `make package` (with the full
+smoke test), attests `dstui-install.sh` and `install.sh` with `actions/attest-build-provenance`,
+and publishes the GitHub release with both files and the version's CHANGELOG section as notes.
+`release.sh` follows that run (`gh run watch`) and prints the release URL, or, if the run
+fails, how to recover. The same workflow builds the installer (without attesting or publishing)
+for every pull request and every push to `main`, so a release build is proven before any tag
+exists; only its tag-only publish job may write to the repository or sign.
 
 Before releasing: bump `version` in `pyproject.toml`, add entries under `## [Unreleased]` (an
 empty section is refused), and run `make lock` if dependencies changed. Pre-flight guards
 require a clean tree on `main` (untracked files and `assume-unchanged` / `skip-worktree`
-entries count), in sync with `origin`, with the tag and release not yet present. For CI or
-other non-interactive runs, set `DSTUI_RELEASE_ASSUME_YES=1` to skip the prompt. The dependency
+entries count), in sync with `origin`, with the tag and release not yet present. For
+non-interactive runs, set `DSTUI_RELEASE_ASSUME_YES=1` to skip the prompt. The dependency
 audit (`pip-audit` of all three locks) runs daily and on every change to a lock; check that its
 last run is green before releasing.
