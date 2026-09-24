@@ -31,6 +31,11 @@ def test_python_version_file_pins_an_exact_cpython_on_the_requires_python_floor(
     assert f"Programming Language :: Python :: {minor}" in PYPROJECT["project"]["classifiers"]
 
 
+def test_pyproject_marks_dstui_private_so_pypi_rejects_an_upload() -> None:
+    """The installer is the only distribution; PyPI refuses any 'Private ::' classifier."""
+    assert "Private :: Do Not Upload" in PYPROJECT["project"]["classifiers"]
+
+
 def test_pyproject_version_is_what_dstui_version_prints(tmp_path: Path) -> None:
     env = {**os.environ, "DSTUI_HOME": str(tmp_path / "home")}
 

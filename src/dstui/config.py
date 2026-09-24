@@ -250,7 +250,8 @@ def _existing_dir(value: str) -> Path:
 
 def resolve_dsh_bin(dsh_bin: Path | None) -> Path | None:
     """The runtime to launch: ``dsh_bin``, else ``dsh`` on PATH, else None for the SDK's
-    embedded runtime if that is installed. Raises DshNotFoundError when there is none.
+    embedded runtime if that is installed (dev and test installs only: the installer never
+    ships it). Raises DshNotFoundError when there is none.
 
     Empty and relative PATH entries are skipped: they mean the current directory, by default
     the agent-writable workspace, and dsh runs outside the agent's sandbox.

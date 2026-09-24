@@ -27,6 +27,9 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: 3 :: Only",
+    # dstui is not published to PyPI: the installer (dstui-install.sh from the GitHub
+    # releases) is its only distribution. PyPI rejects any upload with a Private classifier.
+    "Private :: Do Not Upload",
 ]
 dependencies = [
     # The official SDK, pure Python. Its dependency deepseek-harness-runtime-bin (a 275 MB
