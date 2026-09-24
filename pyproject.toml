@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dstui"
-version = "0.1.0"
+version = "0.1.1"
 description = "Simple Textual TUI for chatting with a DeepSeek Harness agent"
 readme = "README.md"
 # Supported-version floor (package metadata). The exact build / dev / CI
