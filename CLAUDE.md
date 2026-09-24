@@ -22,14 +22,24 @@
 ## Packaging
 
 `make package` builds `dist/dstui-install.sh` (`tools/package/build-binary.sh`), a **makeself**
-self-extracting installer for **linux-x86_64 (glibc)**, about 31 MB. It follows the method of
+self-extracting installer for **linux-x86_64 (glibc)**, about 22 MB. It follows the method of
 devitops-com/aiagent:
-- a bundled uv-managed CPython (version from `.python-version`), **sourceless** (`.pyc` only)
+- a bundled uv-managed CPython, **sourceless** (`.pyc` only)
 - a **zstd -19** payload, unpacked by a bundled static zstd
 - SHA256 integrity checking and an **`-I`** (isolated) launcher; only `dstui` goes on PATH
 
 Run `make lock` and `make dev-install` first.
 
+- **The installer is the only distribution.** dstui is not published to PyPI; the
+  `Private :: Do Not Upload` classifier makes PyPI reject an accidental upload (a test pins it).
+- **CPython is pinned exactly** in `.python-version` (`3.14.7`, the single source of truth for the
+  dev venv, CI, the locks' `--python-version` and the bundle). `requires-python` and the classifier
+  keep the `3.14` floor; a test checks that the two agree.
+- **No libpython in the bundle.** The PBS `bin/python3.14` has libpython linked in statically;
+  the shared `libpython3.14.so*` and `libpython3.so` (32 MB, for embedding only) and
+  `lib/pkgconfig` are dropped. `tools/package/check-python.sh` (tested in
+  `tests/test_bundle_python.py`) fails the build unless the staged interpreter reports exactly
+  `.python-version`, no `libpython*` is left, and no ELF in the tree NEEDs one (`readelf -d`).
 - **Never ship the DeepSeek runtime or Node.** DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`,
   Node >= 22.19) is installed separately.
   - `deepseek-harness-runtime-bin` is a **test-only** dev-extra dependency.
@@ -58,6 +68,8 @@ Run `make lock` and `make dev-install` first.
   - a noexec `$TMPDIR` works
   - the staged interpreter must run before an existing install is replaced
   - the extraction dir defaults to `/var/tmp`, never `/tmp`
+  - `install.sh` with `DSTUI_VERIFY=1` runs the installer only after `gh attestation verify`
+    succeeds (fails closed without `gh`)
 - **Smoke test** (inside `make package`) installs into a temp prefix and checks:
   - module versions against the lock, and that no runtime or Node file is present
   - `--help` and `--version`, also with hostile `PYTHONPATH`/`PYTHONHOME`
@@ -67,21 +79,43 @@ Run `make lock` and `make dev-install` first.
 
 ## Release
 
-`make release` (`tools/release/release.sh`) takes its version from `pyproject.toml` and tags
-`vX.Y.Z`.
-- **Guards:** on `main`, a clean tree (untracked files included), in sync with origin, and the tag
-  and release must not exist yet.
-- **Steps:**
-  1. promote the CHANGELOG `[Unreleased]` section (an empty one is refused)
-  2. rebuild the installer
-  3. commit `chore: release vX.Y.Z` and create an annotated tag
-  4. push both atomically
-  5. `gh release create` with `dstui-install.sh` and `install.sh`
+Releases are built, attested and published by GitHub Actions, not locally. **This departs from
+devitops-com/aiagent** (whose `release.sh` builds and publishes on the maintainer's machine):
+GitHub artifact attestations can only be made inside GitHub Actions. Porting this flow, and all
+the other installer fixes made here, to aiagent is deferred until dstui is done.
+
+- **`make release`** (`tools/release/release.sh`) only tags. It takes the version from
+  `pyproject.toml`.
+  - **Guards:** on `main`, a clean tree (untracked files and assume-unchanged / skip-worktree
+    entries included), in sync with origin, and the tag and release must not exist yet.
+  - **Steps:** promote the CHANGELOG `[Unreleased]` section (an empty one is refused, via
+    `tools/release/release-notes.sh`), commit `chore: release vX.Y.Z`, create an annotated tag,
+    push both atomically. No build and no `gh release create`.
+  - Then it waits up to `DSTUI_RELEASE_WATCH_WAIT` seconds (default 60) for the tag's run of
+    `release.yml`, follows it with `gh run watch` and prints the release URL, or the recovery
+    for a failed run. If no run shows up it says where to follow it and still succeeds.
+  - **Non-interactive release:** set `DSTUI_RELEASE_ASSUME_YES=1`.
+- **`release.yml`** runs on pull requests, pushes to `main` and `v*` tags.
+  - Job `package` (read-only token, on every run): checks on a tag that it matches
+    `pyproject.toml`, sets up uv (pinned), installs makeself, runs `make dev-install` and
+    `make package` (full smoke test) and uploads `dist/dstui-install.sh`. So a PR proves the
+    release build before any tag exists.
+  - Job `publish` (tag pushes only; the only job with `contents: write`, `id-token: write`,
+    `attestations: write`): extracts the version's notes with `release-notes.sh`, attests
+    `dist/dstui-install.sh` and `install.sh` (`actions/attest-build-provenance`) and runs
+    `gh release create vX.Y.Z --verify-tag --title "dstui vX.Y.Z" --notes-file …` with both
+    files.
+  - A concurrency group per ref builds a tag once.
 - **`install.sh`** is the `curl … | sh` bootstrap. It is HTTPS-only, honours `DSTUI_PREFIX` and
-  `DSTUI_VERSION`, and stages under `$TMPDIR` (default `/var/tmp`).
-- **Non-interactive release:** set `DSTUI_RELEASE_ASSUME_YES=1`.
+  `DSTUI_VERSION`, and stages under `$TMPDIR` (default `/var/tmp`). `DSTUI_VERIFY=1` (opt-in)
+  runs `gh attestation verify <download> --repo ksparavec/dstui` first and fails closed: no `gh`,
+  a failed check or any other `DSTUI_VERIFY` value than `0`/`1` means exit 1, nothing run, the
+  download removed.
 - **CI:**
-  - `ci.yml` pins its actions by SHA. It runs ruff, mypy --strict, bandit, and the tests with
-    coverage, with bubblewrap/userns enabled for the `sdk` profile. It also builds the wheel and
-    sdist, and checks that the wheel runs without the embedded runtime.
+  - Every workflow pins its actions by SHA and checks out without persisting the token (a test
+    checks both).
+  - `ci.yml` runs ruff, mypy --strict, bandit, and the tests with coverage, with bubblewrap/userns
+    enabled for the `sdk` profile. It also builds the wheel and sdist, and checks that the wheel
+    runs without the embedded runtime.
   - `audit.yml` runs pip-audit on all three locks, daily and on every lock change.
+  - `actions/setup-python` takes `.python-version`; 3.14.7 is in its versions manifest.
