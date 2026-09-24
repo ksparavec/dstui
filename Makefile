@@ -1,7 +1,8 @@
 SHELL := /bin/bash
 
-# Single source of truth for the Python version (dev venv, CI, and the bundled
-# installer all derive from .python-version — edit it there only).
+# Single source of truth for the exact Python version, X.Y.Z: the dev venv, CI, the locks and
+# the bundled installer all derive from .python-version (edit it there only; the build fails
+# unless the bundled interpreter is exactly this version).
 PYTHON_VERSION := $(shell cat .python-version)
 
 # Prefer .venv/bin/* when present (dev-install), else fall back to PATH.

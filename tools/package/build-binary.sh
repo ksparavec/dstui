@@ -2,7 +2,7 @@
 #
 # build-binary.sh — produce `dist/dstui-install.sh`, a self-extracting
 # **makeself** installer carrying a relocatable, sourceless-precompiled CPython
-# 3.x with dstui + every runtime dependency.
+# (exactly the X.Y.Z in .python-version) with dstui + every runtime dependency.
 #
 # NOT in the bundle: DeepSeek Harness. The SDK's embedded runtime
 # (deepseek-harness-runtime-bin: a 275 MB Node single executable + ripgrep
@@ -10,6 +10,11 @@
 # `dsh` (npm @deepseek-ai/dsh). requirements.txt leaves it out, every dependency
 # installs with --no-deps, and tools/package/check-no-runtime.sh fails the build
 # if it — or anything Node — gets in anyway.
+#
+# The interpreter ships without libpython: python-build-standalone links it statically
+# into bin/pythonX.Y, and the shared libpythonX.Y.so (32 MB) is only for embedding.
+# tools/package/check-python.sh fails the build unless the staged interpreter is
+# exactly the pinned version and no libpython, nor any ELF that needs one, is left.
 #
 # The heavy tree is zstd-compressed and decompressed at install time by a BUNDLED
 # static zstd, so target hosts need neither Python nor zstd. `.py` sources are
@@ -36,15 +41,19 @@ ARCH="$(uname -m)"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+# .python-version pins the exact CPython (X.Y.Z); paths and the launcher use X.Y.
 PY_VERSION="$(tr -d '[:space:]' < "$ROOT/.python-version")"
-[ -n "$PY_VERSION" ] || { echo "ERROR: cannot read .python-version" >&2; exit 1; }
-PY_NODOT="${PY_VERSION/./}"
+[[ "$PY_VERSION" =~ ^3\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "ERROR: .python-version must pin an exact CPython X.Y.Z, got '$PY_VERSION'" >&2; exit 1; }
+PY_MINOR="${PY_VERSION%.*}"
+PY_NODOT="${PY_MINOR/./}"
 
 DIST="$ROOT/dist"
 STAGE="$DIST/.build"
 MKDIR="$DIST/.mkself"
 STARTUP_IN="$ROOT/tools/package/startup.sh.in"
 CHECK_NO_RUNTIME="$ROOT/tools/package/check-no-runtime.sh"
+CHECK_PYTHON="$ROOT/tools/package/check-python.sh"
 OUT="$DIST/$APP-install.sh"
 REQ="$ROOT/requirements.txt"
 BUILD_REQ="$ROOT/requirements-build.txt"
@@ -118,20 +127,20 @@ case "$BASEP" in
 esac
 echo "==> Staging interpreter from $BASEP"
 cp -a "$BASEP" "$STAGE/python"
-PY="$STAGE/python/bin/python${PY_VERSION}"
-rm -f "$STAGE/python/lib/python${PY_VERSION}/EXTERNALLY-MANAGED"
+PY="$STAGE/python/bin/python${PY_MINOR}"
+rm -f "$STAGE/python/lib/python${PY_MINOR}/EXTERNALLY-MANAGED"
 
 # --- 4. Prune unused stdlib (incl. Tcl/Tk v8 AND v9) --------------------
-( cd "$STAGE/python/lib/python${PY_VERSION}" && rm -rf \
+( cd "$STAGE/python/lib/python${PY_MINOR}" && rm -rf \
     test tkinter turtledemo idlelib lib2to3 ensurepip \
-    config-${PY_VERSION}-*-linux-gnu 2>/dev/null || true )
+    "config-${PY_MINOR}"-*-linux-gnu 2>/dev/null || true )
 # tkinter is gone, so Tcl/Tk is dead weight. The standalone ships v9
 # (libtcl9tk9.0.so, tcl9/, tk9/) — match v8 AND v9.
 ( cd "$STAGE/python/lib" && rm -rf \
     tcl8* tk8* tcl9* tk9* Tix* itcl* tdbc* thread* libtcl* libtk* 2>/dev/null || true )
 
 # --- 4b. Reset site-packages to a clean baseline (keep only pip) --------
-( cd "$STAGE/python/lib/python${PY_VERSION}/site-packages" && for d in *; do
+( cd "$STAGE/python/lib/python${PY_MINOR}/site-packages" && for d in *; do
     case "$d" in pip|pip-*|__pycache__) ;; *) rm -rf "$d" ;; esac
   done )
 
@@ -159,18 +168,23 @@ unmet="$("$PY" -m pip check 2>&1 | grep -vE \
 # The DeepSeek runtime — or anything Node — must not have got in.
 bash "$CHECK_NO_RUNTIME" "$STAGE/python"
 
-SP="$STAGE/python/lib/python${PY_VERSION}/site-packages"
+SP="$STAGE/python/lib/python${PY_MINOR}/site-packages"
 ( cd "$SP" && rm -rf pip setuptools wheel pkg_resources _distutils_hack 2>/dev/null || true )
 find "$SP" -name direct_url.json -delete 2>/dev/null || true
 
 # --- 5b. Strip dead weight ---------------------------------------------
-echo "==> Stripping dead weight (dep CLIs, headers, dep tests)"
+echo "==> Stripping dead weight (dep CLIs, headers, libpython, dep tests)"
 ( cd "$STAGE/python/bin" && for f in *; do
-    case "$f" in python${PY_VERSION}|python3|python|${APP}) ;; *) rm -f "$f" ;; esac
+    case "$f" in "python${PY_MINOR}"|python3|python|"${APP}") ;; *) rm -f "$f" ;; esac
   done )
-rm -rf "$STAGE/python/include" "$STAGE/python/share"
-rm -f "$STAGE/python/lib"/libpython*.a
+rm -rf "$STAGE/python/include" "$STAGE/python/share" "$STAGE/python/lib/pkgconfig"
+# libpythonX.Y.so*, libpython3.so and any static libpython: for embedding only. bin/pythonX.Y
+# has libpython linked in statically, and no extension module links against it (gated next).
+rm -f "$STAGE/python/lib"/libpython*
 find "$SP" -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true
+
+# Exactly the pinned CPython, no libpython left, and no ELF that NEEDs one.
+bash "$CHECK_PYTHON" "$STAGE/python" "$PY_VERSION"
 
 # --- 5c. No build-host paths in the payload -----------------------------
 # uv rewrote the interpreter's sysconfig data from python-build-standalone's neutral
@@ -178,7 +192,7 @@ find "$SP" -type d -name tests -prune -exec rm -rf {} + 2>/dev/null || true
 # with the staging path. Put /install back (sysconfig derives the real paths from
 # sys.prefix at run time) and give the launcher a placeholder shebang, which the
 # installer rewrites to the bundled interpreter anyway.
-"$PY" -I - "$BASEP" "$STAGE/python/lib/python${PY_VERSION}"/_sysconfigdata_*.py <<'PYEOF'
+"$PY" -I - "$BASEP" "$STAGE/python/lib/python${PY_MINOR}"/_sysconfigdata_*.py <<'PYEOF'
 import sys
 base, *files = sys.argv[1:]
 for name in files:
@@ -192,10 +206,11 @@ case "$(head -n1 "$LAUNCHER")" in
     '#!'*/python*) ;;
     *) echo "ERROR: unexpected first line in pip's $APP launcher: $(head -n1 "$LAUNCHER")" >&2; exit 1 ;;
 esac
-sed -i "1s|.*|#!/install/bin/python${PY_VERSION}|" "$LAUNCHER"
+sed -i "1s|.*|#!/install/bin/python${PY_MINOR}|" "$LAUNCHER"
 
 # --- 6. Sanity-check the staged interpreter ----------------------------
-# NB: do NOT `strip` libpython — it corrupts PBS symbol-version tables.
+# NB: do NOT `strip` the PBS ELF files: that corrupted libpython's symbol-version tables, and
+# bin/python carries the same (statically linked) code.
 "$PY" -c "import sqlite3, ssl, ctypes" \
     || { echo "ERROR: staged interpreter is not functional" >&2; exit 1; }
 
@@ -284,7 +299,7 @@ foreign="$("$MKDIR/zstd" -dc "$MKDIR/bundle.tar.zst" | tar --numeric-owner -tvf 
 {
     printf '%s\n' '#!/bin/sh'
     printf 'DSTUI_VERSION=%s\n' "$VERSION"
-    printf 'PYVER=%s\n' "$PY_VERSION"
+    printf 'PYVER=%s\n' "$PY_MINOR"
     cat "$STARTUP_IN"
 } > "$MKDIR/startup.sh"
 chmod +x "$MKDIR/startup.sh"
@@ -309,7 +324,7 @@ rm -rf "$STAGE" "$MKDIR"
 echo "==> Smoke test (install to a temp prefix under /var/tmp + run)"
 TPREFIX="$WORK/prefix"
 DSTUI_PREFIX="$TPREFIX" sh "$OUT" >/dev/null
-BUNDLE_PY="$TPREFIX/lib/$APP/bin/python${PY_VERSION}"
+BUNDLE_PY="$TPREFIX/lib/$APP/bin/python${PY_MINOR}"
 
 # Version audit: confirm every installed module matches requirements.txt, at both
 # the dist-info metadata AND the imported-code (__version__) level.
@@ -321,7 +336,7 @@ echo "==> Verifying bundled module versions against requirements.txt"
 bash "$CHECK_NO_RUNTIME" "$TPREFIX"
 
 # $PREFIX/bin must contain ONLY `dstui`: the bundled interpreter on PATH would shadow
-# the host's own python$PY_VERSION (see startup.sh.in).
+# the host's own python$PY_MINOR (see startup.sh.in).
 onpath="$(ls "$TPREFIX/bin")"
 if [ "$onpath" != "$APP" ]; then
     echo "ERROR: \$PREFIX/bin must expose only '$APP', got:" >&2
@@ -466,7 +481,7 @@ fi
 echo "    ok (versions, no runtime/Node, bin=dstui, --help, --version, hermetic, modes, no-dsh exit 1, agent turn, TUI mount)"
 
 # --- 13. Report --------------------------------------------------------
-SIZE="$(du -h "$OUT" | cut -f1)"
+SIZE="$(du -h --apparent-size "$OUT" | cut -f1)"   # not the blocks XFS preallocated
 echo ""
 echo "Built installer:"
 echo "  $OUT  ($SIZE)"
