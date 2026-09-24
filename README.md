@@ -253,6 +253,7 @@ make test PYTEST_ARGS='-m "not e2e"'    # unit and UI tests only (fast, no runti
 make test PYTEST_ARGS='-m e2e'          # bridge and full-app tests on the real runtime
 make test-cov                           # coverage; fails below 90 %
 make lock                               # re-pin requirements*.txt after a dependency change
+make lock LOCK_ARGS='--upgrade-package textual'   # move one locked package (uv keeps the pins)
 make help                               # every target
 ```
 
