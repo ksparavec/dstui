@@ -5,20 +5,24 @@ python-build-standalone links libpython statically into ``bin/python3.X``; the s
 fails if the version is not exactly ``.python-version``, if a libpython file is still there, or if
 any ELF in the tree NEEDs one. The ELF files here are minimal hand-made shared objects with just a
 dynamic section, which is all ``readelf -d`` reads.
+
+Before that, build-binary.sh has uv install exactly that CPython; when uv cannot (too old to know
+a newly pinned patch, or Python downloads disabled) the build stops with uv's own reason.
 """
 
 from __future__ import annotations
 
+import shutil
 import struct
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tests.helpers_scripts import ROOT, SYSTEM_PATH, run_script, write_program
+from tests.helpers_scripts import PINNED_PYTHON as PINNED
+from tests.helpers_scripts import ROOT, SYSTEM_PATH, VERSION, run_script, write_program
 
 CHECK_PYTHON = ROOT / "tools" / "package" / "check-python.sh"
-PINNED = (ROOT / ".python-version").read_text().strip()
 MINOR = PINNED.rsplit(".", 1)[0]
 
 DT_NULL, DT_NEEDED, DT_STRTAB, DT_STRSZ = 0, 1, 5, 10
@@ -140,3 +144,61 @@ def test_check_python_rejects_bad_usage(args: list[str]) -> None:
 
     assert result.returncode == 2
     assert "usage: check-python.sh" in result.stderr
+
+
+# ---------------------------------------------------- build-binary.sh: obtaining the pinned CPython
+
+BUILD_BINARY = ROOT / "tools" / "package" / "build-binary.sh"
+UV_CANNOT_DOWNLOAD = f"error: No download found for request: cpython-{PINNED}-linux-x86_64-gnu"
+
+
+def fake_build_project(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A project copy with the real build-binary.sh and just enough around it (locks, dev venv,
+    makeself, readelf, x86_64) to reach the interpreter step, with a fake uv that builds a wheel
+    but, like uv 0.12.17 asked for a CPython it has no download for, cannot install the pin. Every
+    uv call is logged to ``uv.log``."""
+    project = tmp_path / "project"
+    (project / "tools" / "package").mkdir(parents=True)
+    shutil.copy2(BUILD_BINARY, project / "tools" / "package" / "build-binary.sh")
+    shutil.copy2(ROOT / ".python-version", project / ".python-version")
+    (project / "pyproject.toml").write_text(f'[project]\nname = "dstui"\nversion = "{VERSION}"\n')
+    (project / "requirements.txt").write_text("textual==1.0\n")
+    (project / "requirements-build.txt").write_text("hatchling==1.0\n")
+    write_program(project / ".venv" / "bin" / "python", "echo /nonexistent/dsh\n")
+    bin_dir = tmp_path / "bin"
+    write_program(bin_dir / "uname", "echo x86_64\n")
+    write_program(bin_dir / "readelf", "exit 0\n")
+    write_program(bin_dir / "makeself", "exit 0\n")
+    (bin_dir / "makeself-header.sh").write_text("TMPROOT=\\${TMPDIR:=/tmp}\n")
+    wheel = f"dstui-{VERSION}-py3-none-any.whl"
+    write_program(
+        bin_dir / "uv",
+        f'''echo "$*" >> "{tmp_path / "uv.log"}"
+case "$1 $2" in
+    "--version ") echo "uv 0.0.1" ;;
+    "build --wheel") while [ $# -gt 1 ]; do [ "$1" != -o ] || : > "$2/{wheel}"; shift; done ;;
+    "python install") echo "{UV_CANNOT_DOWNLOAD}" >&2; exit 2 ;;
+    "python find") echo "error: No interpreter found for Python $5 in managed installations" >&2
+                   exit 2 ;;
+esac
+''',
+    )
+    return project, {"PATH": f"{bin_dir}:{SYSTEM_PATH}", "HOME": str(tmp_path / "home")}
+
+
+def test_the_build_stops_with_uvs_reason_when_uv_cannot_install_the_pinned_cpython(
+    tmp_path: Path,
+) -> None:
+    """A patch bump of .python-version needs a uv that knows the new CPython, in CI too (the
+    setup-uv version in release.yml): the error says so instead of a bare 'No interpreter found'."""
+    project, env = fake_build_project(tmp_path)
+
+    result = run_script(["bash", str(project / "tools" / "package" / "build-binary.sh")], env)
+
+    assert result.returncode == 1
+    assert UV_CANNOT_DOWNLOAD in result.stderr.splitlines()
+    assert f"ERROR: uv 0.0.1 cannot install CPython {PINNED} (.python-version)" in result.stderr
+    assert ".github/workflows/release.yml" in result.stderr
+    calls = (tmp_path / "uv.log").read_text().splitlines()
+    assert f"python install {PINNED}" in calls
+    assert not [call for call in calls if call.startswith("python find")]

@@ -242,7 +242,7 @@ reset it). Session logs and `dstui.log` are never pruned.
 ## Development
 
 ```sh
-make dev-install                        # .venv: the hash-locked [dev] extra + dstui editable
+make dev-install                        # fresh .venv on .python-version: locked [dev] extra + dstui editable
 make check                              # ruff (lint + format), mypy --strict and bandit
 make test                               # everything
 make test PYTEST_ARGS='-m "not e2e"'    # unit and UI tests only (fast, no runtime)
@@ -268,7 +268,10 @@ runtime and other child processes inherit its private `TMPDIR`. So plain `uv run
 the locks, fully hashed: what the installer bundles, what `make dev-install` and CI install, and
 the build backend that builds the shipped wheel. A test fails when `pyproject.toml` asks for
 something the locks do not satisfy. `uv run` works in the `.venv` as it is, without a
-`uv.lock`.
+`uv.lock`. The tests also fail on any CPython other than `.python-version` (a venv from before a
+pin bump): re-run `make dev-install`, which recreates `.venv`. A patch bump of `.python-version`
+may need a newer uv, which only knows the CPython patches published before it (in CI too: the
+setup-uv `version` in `.github/workflows/release.yml`).
 
 Code layout (`src/dstui/`):
 

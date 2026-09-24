@@ -35,6 +35,11 @@ Run `make lock` and `make dev-install` first.
 - **CPython is pinned exactly** in `.python-version` (`3.14.7`, the single source of truth for the
   dev venv, CI, the locks' `--python-version` and the bundle). `requires-python` and the classifier
   keep the `3.14` floor; a test checks that the two agree.
+  - `make dev-install` recreates `.venv` on exactly that version (`uv venv --clear`), and a test
+    fails when the suite runs on any other interpreter (a stale venv: re-run `make dev-install`).
+  - A patch bump may need a newer uv, which only knows the CPython patches published before it:
+    locally, and in CI setup-uv's `version` in `release.yml`. The build then stops with uv's
+    reason (`No download found for request: cpython-...`) and says so.
 - **No libpython in the bundle.** The PBS `bin/python3.14` has libpython linked in statically;
   the shared `libpython3.14.so*` and `libpython3.so` (32 MB, for embedding only) and
   `lib/pkgconfig` are dropped. `tools/package/check-python.sh` (tested in

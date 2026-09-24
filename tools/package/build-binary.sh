@@ -117,8 +117,15 @@ WHEEL="$(ls "$DIST"/${APP}-${VERSION}-*.whl)"
 
 # --- 3. Stage a standalone, relocatable CPython -------------------------
 # --system --managed-python: a uv-managed (python-build-standalone) interpreter, never
-# the project's .venv or a distro python — only the former is relocatable.
-uv python install "$PY_VERSION" >/dev/null 2>&1 || true
+# the project's .venv or a distro python — only the former is relocatable. A uv release
+# only knows the CPython patches published before it: a bump of .python-version may need
+# a newer uv, locally and in CI (setup-uv's `version` in .github/workflows/release.yml).
+if ! uv_out="$(uv python install "$PY_VERSION" 2>&1)"; then
+    printf '%s\n' "$uv_out" >&2
+    echo "ERROR: $(uv --version) cannot install CPython $PY_VERSION (.python-version): update uv" \
+         "(in CI: setup-uv's version in .github/workflows/release.yml) or allow uv's Python downloads" >&2
+    exit 1
+fi
 PYBIN="$(uv python find --system --managed-python "$PY_VERSION")"
 BASEP="$(cd "$("$PYBIN" -c 'import sys; print(sys.base_prefix)')" && pwd -P)"
 case "$BASEP" in

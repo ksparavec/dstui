@@ -1,8 +1,10 @@
 SHELL := /bin/bash
 
 # Single source of truth for the exact Python version, X.Y.Z: the dev venv, CI, the locks and
-# the bundled installer all derive from .python-version (edit it there only; the build fails
-# unless the bundled interpreter is exactly this version).
+# the bundled installer all derive from .python-version (edit it there; the build fails unless
+# the bundled interpreter is exactly this version). A patch bump also needs a uv that knows the
+# new CPython: locally, and the setup-uv `version` in .github/workflows/release.yml. Then re-run
+# `make dev-install` (the test suite fails on any other interpreter).
 PYTHON_VERSION := $(shell cat .python-version)
 
 # Prefer .venv/bin/* when present (dev-install), else fall back to PATH.
@@ -24,10 +26,12 @@ help: ## Show this help
 
 # --- Setup ---
 
-# Exactly the hash-checked versions of requirements-dev.txt (the tests run on what ships), then
-# dstui itself, editable, built by the hash-pinned backend of requirements-build.txt.
+# A fresh venv on exactly .python-version (--clear: a venv left on another patch must not
+# survive; uv's errors stay visible), then exactly the hash-checked versions of
+# requirements-dev.txt (the tests run on what ships), then dstui itself, editable, built by the
+# hash-pinned backend of requirements-build.txt.
 dev-install: ## Set up .venv with dstui + dev dependencies from the locks (editable; incl. the test-only runtime)
-	uv venv --python $(PYTHON_VERSION) .venv 2>/dev/null || true
+	uv venv --clear --python $(PYTHON_VERSION) .venv
 	uv pip sync --python .venv/bin/python --require-hashes requirements-dev.txt
 	uv pip install --python .venv/bin/python --no-deps --build-constraints requirements-build.txt -e .
 
