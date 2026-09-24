@@ -28,6 +28,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A prefix the installer refuses is no longer created.** A prefix with
   whitespace, or one too long for a `#!` line, was refused only after
   `mkdir -p` had made it and its missing parents; the checks now run first.
+- **A prefix too long for a `#!` line is refused on every Linux, non-ASCII ones
+  included.** Where `/bin/sh` is bash (Fedora, RHEL, Arch) under a UTF-8 locale,
+  the check counted characters instead of the kernel's bytes, so such a prefix
+  installed a `dstui` that could not start. It now counts bytes.
 - **The README described `--target DIR` wrongly.** Without `--` it is
   makeself's own option: it extracts the raw payload into `DIR`, keeps it there
   and still installs into the default prefix. Use `DSTUI_PREFIX` or

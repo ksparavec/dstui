@@ -76,8 +76,11 @@ set_shebang() {
       echo "       carry. Re-run with DSTUI_PREFIX (or -- --prefix DIR) set to a path without it." >&2
       exit 1 ;;
   esac
-  if [ ${#shebang} -gt 127 ]; then
-    echo "error: install path too long — shebang '$shebang' is ${#shebang} bytes" >&2
+  # In bytes, as the kernel counts: where sh is bash (Fedora, RHEL, Arch), ${#shebang}
+  # counts characters under a UTF-8 locale. $((…)) drops any padding wc may print.
+  bytes=$(($(printf '%s' "$shebang" | wc -c)))
+  if [ "$bytes" -gt 127 ]; then
+    echo "error: install path too long — shebang '$shebang' is $bytes bytes" >&2
     echo "       (kernel limit 127). Re-run with a shorter DSTUI_PREFIX (or -- --prefix DIR)." >&2
     exit 1
   fi
