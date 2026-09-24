@@ -42,12 +42,17 @@ dev-install: ## Set up .venv with dstui + dev dependencies from the locks (edita
 # requirements-dev.txt keeps it: `make dev-install` and CI install it for the e2e tests.
 # requirements-build.txt pins the build backend (pyproject [build-system]) that builds the
 # shipped wheel.
-lock: ## Regenerate requirements.txt, requirements-dev.txt and requirements-build.txt from pyproject.toml
+# uv keeps the pins already in a lock, so a plain `make lock` never moves a locked package.
+# LOCK_ARGS passes extra uv flags to every compile, e.g. to get past an advisory:
+#   make lock LOCK_ARGS='--upgrade-package textual'   (or --upgrade: re-resolve everything)
+LOCK_ARGS ?=
+
+lock: ## Regenerate requirements.txt, requirements-dev.txt and requirements-build.txt from pyproject.toml (LOCK_ARGS: extra uv flags)
 	uv pip compile pyproject.toml --python-version $(PYTHON_VERSION) --generate-hashes \
-		--no-emit-package deepseek-harness-runtime-bin -o requirements.txt
-	uv pip compile pyproject.toml --python-version $(PYTHON_VERSION) --extra dev --generate-hashes -o requirements-dev.txt
+		--no-emit-package deepseek-harness-runtime-bin -o requirements.txt $(LOCK_ARGS)
+	uv pip compile pyproject.toml --python-version $(PYTHON_VERSION) --extra dev --generate-hashes -o requirements-dev.txt $(LOCK_ARGS)
 	$(PYTHON) -c 'import tomllib; print(*tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"], sep="\n")' | \
-		uv pip compile - --python-version $(PYTHON_VERSION) --generate-hashes -o requirements-build.txt
+		uv pip compile - --python-version $(PYTHON_VERSION) --generate-hashes -o requirements-build.txt $(LOCK_ARGS)
 
 # --- Testing ---
 

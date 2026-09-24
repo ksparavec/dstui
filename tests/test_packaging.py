@@ -183,6 +183,60 @@ def test_make_lock_also_pins_the_build_backend() -> None:
     assert "--generate-hashes" in recipe
 
 
+LOCKS = ["requirements.txt", "requirements-dev.txt", "requirements-build.txt"]
+
+
+def run_make_lock(tmp_path: Path, *make_args: str) -> subprocess.CompletedProcess[str]:
+    """``make lock`` on a copy of the Makefile, .python-version and pyproject.toml with a fake uv
+    that logs each call to ``uv.log`` and what it reads for ``-`` (stdin) to ``uv.stdin``."""
+    project = tmp_path / "project"
+    project.mkdir()
+    for name in ("Makefile", ".python-version", "pyproject.toml"):
+        shutil.copy2(ROOT / name, project / name)
+    write_program(project / ".venv" / "bin" / "python", f'exec "{sys.executable}" "$@"\n')
+    uv = write_program(
+        tmp_path / "bin" / "uv",
+        f'echo "$*" >> "{tmp_path / "uv.log"}"\n'
+        f'case " $* " in *" - "*) cat > "{tmp_path / "uv.stdin"}" ;; esac\n',
+    )
+    return run_script(
+        ["make", "-s", "lock", *make_args], {"PATH": f"{uv.parent}:{SYSTEM_PATH}"}, cwd=project
+    )
+
+
+def lock_compiles(tmp_path: Path) -> dict[str, list[str]]:
+    """Each ``uv pip compile`` call by the lock it writes (-o)."""
+    compiles = [call for call in uv_calls(tmp_path) if call[:2] == ["pip", "compile"]]
+    return {call[call.index("-o") + 1]: call for call in compiles}
+
+
+def test_make_lock_compiles_each_lock_once(tmp_path: Path) -> None:
+    result = run_make_lock(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    compiles = lock_compiles(tmp_path)
+    assert sorted(compiles) == sorted(LOCKS)
+    assert len(uv_calls(tmp_path)) == len(LOCKS)
+    assert all(call[-2:] == ["-o", lock] for lock, call in compiles.items())
+    assert compiles["requirements-build.txt"][2] == "-"  # [build-system] requires, on stdin
+    build_requires = PYPROJECT["build-system"]["requires"]
+    assert (tmp_path / "uv.stdin").read_text().splitlines() == build_requires
+
+
+def test_make_lock_passes_lock_args_to_every_compile(tmp_path: Path) -> None:
+    """uv keeps the pins already in a lock, so a plain ``make lock`` never moves a locked package
+    (past an advisory, say): LOCK_ARGS passes uv's own flags through, e.g.
+    ``make lock LOCK_ARGS='--upgrade-package textual'``."""
+    upgrade = ["--upgrade-package", "textual", "--upgrade-package", "rich"]
+
+    result = run_make_lock(tmp_path, f"LOCK_ARGS={' '.join(upgrade)}")
+
+    assert result.returncode == 0, result.stderr
+    compiles = lock_compiles(tmp_path)
+    assert sorted(compiles) == sorted(LOCKS)
+    assert all(call[-len(upgrade) :] == upgrade for call in compiles.values())
+
+
 def lock_entries(lock: str) -> list[str]:
     """One string per requirement (continuation lines joined)."""
     text = (ROOT / lock).read_text(encoding="utf-8").replace("\\\n", " ")

@@ -68,7 +68,10 @@ Run `make lock` and `make dev-install` first.
   - `requirements-dev.txt`: what dev-install and CI install.
   - `requirements-build.txt`: the build backend for the shipped wheel.
 
-  There is no `uv.lock`, and `[tool.uv] managed = false`.
+  There is no `uv.lock`, and `[tool.uv] managed = false`. uv keeps the pins already in a lock,
+  so a plain `make lock` never moves a locked package (past an advisory, say). `LOCK_ARGS`
+  passes uv flags to all three compiles: `make lock LOCK_ARGS='--upgrade-package X'` moves one,
+  `--upgrade` re-resolves everything (tested with a fake uv in `tests/test_packaging.py`).
 - **dsh resolution** (`config.resolve_dsh_bin`, called in `main()`) goes in this order:
   1. `--dsh-bin`
   2. `dsh` on PATH, absolute entries only

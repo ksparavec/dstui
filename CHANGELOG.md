@@ -12,6 +12,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kept a redirect on HTTPS; the flag is gone. With curl (used whenever it is
   installed) every redirect stays on HTTPS, as before. On a host with only wget,
   `DSTUI_VERIFY=1` checks what it downloaded.
+- **`make lock` can move a locked package.** uv keeps the pins already in the
+  lock files, so a plain `make lock` never upgraded one (past an advisory, say).
+  `LOCK_ARGS` passes uv flags to every lock: `make lock
+  LOCK_ARGS='--upgrade-package textual'`, or `--upgrade` to re-resolve everything.
 
 ## [0.1.0] - 2026-09-24
 
