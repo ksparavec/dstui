@@ -1,0 +1,120 @@
+name: Release
+
+# One build definition for both uses:
+#   - pull requests and main: prove the release build works (installer + full smoke test)
+#     before any tag exists;
+#   - a pushed version tag (tools/release/release.sh pushes it): build, then attest and
+#     publish the GitHub release.
+# GitHub artifact attestations can only be made inside GitHub Actions, so releases are built
+# here and not on the maintainer's machine (unlike devitops-com/aiagent, which builds locally).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+# A tag is built once: a second run for the same tag waits instead of cancelling the first.
+# Runs for a branch or pull request replace their predecessor.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: installer + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false  # no later step needs the token in .git/config
+
+      # Before a build is spent on it: the tag must name the version pyproject.toml declares.
+      - name: Check the tag against pyproject.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
+            exit 1
+          fi
+
+      # uv builds everything: the dev venv, the wheel and the bundled interpreter, which is
+      # exactly the CPython X.Y.Z in .python-version (python-build-standalone). No cache: the
+      # installer is built from the hash-checked locks, never from files another run cached.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.17"
+          enable-cache: false
+
+      # makeself assembles the installer; gcc/make build the static zstd and readelf gates
+      # the bundled interpreter (both preinstalled on the runner).
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends makeself
+          gcc --version >/dev/null && make --version >/dev/null && readelf --version >/dev/null
+
+      # The smoke test runs one real agent turn with the dev extra's embedded runtime standing
+      # in for the separately installed dsh (it is never copied into the bundle).
+      - name: Dev environment from the locks
+        run: make dev-install
+
+      - name: Build the installer (full smoke test)
+        run: make package
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dstui-install
+          path: dist/dstui-install.sh
+          if-no-files-found: error
+
+  publish:
+    name: attest + publish
+    needs: package
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job that may write: the build above ran with a read-only token.
+    permissions:
+      contents: write      # create the GitHub release
+      id-token: write      # sign the attestations (Sigstore, through the job's OIDC token)
+      attestations: write  # store them with the repository
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false  # gh gets the token through GH_TOKEN
+
+      - name: Download the installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dstui-install
+          path: dist
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash tools/release/release-notes.sh "${TAG#v}" > "$RUNNER_TEMP/notes.md"
+
+      # Verify with: gh attestation verify dstui-install.sh --repo ksparavec/dstui
+      # (install.sh does it before running the installer when DSTUI_VERIFY=1).
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/dstui-install.sh
+            install.sh
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          NOTES: ${{ runner.temp }}/notes.md
+        run: gh release create "$TAG" --verify-tag --title "dstui $TAG" --notes-file "$NOTES" dist/dstui-install.sh install.sh

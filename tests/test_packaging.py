@@ -6,8 +6,10 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -169,3 +171,126 @@ def test_the_locks_satisfy_what_pyproject_declares(lock: str, requirements: list
         assert requirement.specifier.contains(pins[name], prereleases=True), (
             f"{lock} pins {name}=={pins[name]}, pyproject wants {requirement}: run make lock"
         )
+
+
+# ----------------------------------------------------------------------------------- workflows
+
+WORKFLOWS = ROOT / ".github" / "workflows"
+PINNED_ACTION = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
+ATTEST_ACTION = "actions/attest-build-provenance@"
+RELEASE_ASSETS = ["dist/dstui-install.sh", "install.sh"]
+
+
+def workflow(name: str) -> dict[str, Any]:
+    data: dict[Any, Any] = yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+    if True in data:  # YAML 1.1 reads a bare `on:` key as the boolean true
+        data["on"] = data.pop(True)
+    return data
+
+
+def steps(job: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(job["steps"])
+
+
+def step_using(job: dict[str, Any], action: str) -> list[dict[str, Any]]:
+    return [step for step in steps(job) if str(step.get("uses", "")).startswith(action)]
+
+
+def run_lines(job: dict[str, Any]) -> list[str]:
+    return [line.strip() for step in steps(job) for line in str(step.get("run", "")).splitlines()]
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in WORKFLOWS.glob("*.yml")))
+def test_every_action_is_pinned_by_commit_sha_and_checkout_keeps_no_token(name: str) -> None:
+    for job in workflow(name)["jobs"].values():
+        for step in steps(job):
+            uses = step.get("uses")
+            if uses is None:
+                continue
+            assert PINNED_ACTION.match(uses), f"{name}: {uses} is not pinned by a commit SHA"
+            if uses.startswith("actions/checkout@"):
+                assert step["with"]["persist-credentials"] is False, name
+
+
+def test_the_release_workflow_runs_on_version_tags_and_proves_the_build_on_prs_and_main() -> None:
+    on = workflow("release.yml")["on"]
+
+    assert on["push"]["tags"] == ["v*"]
+    assert on["push"]["branches"] == ["main"]
+    assert "pull_request" in on
+
+
+def test_the_release_workflow_builds_a_tag_once() -> None:
+    concurrency = workflow("release.yml")["concurrency"]
+
+    assert "github.ref" in concurrency["group"]
+    assert concurrency["cancel-in-progress"] == "${{ github.ref_type != 'tag' }}"
+
+
+def test_only_the_tag_only_publish_job_may_write_sign_and_attest() -> None:
+    release = workflow("release.yml")
+    jobs = release["jobs"]
+
+    assert release["permissions"] == {"contents": "read"}
+    assert set(jobs) == {"package", "publish"}
+    assert jobs["package"].get("permissions", {"contents": "read"}) == {"contents": "read"}
+    publish = jobs["publish"]
+    assert publish["permissions"] == {
+        "contents": "write",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    assert publish["needs"] == "package"
+    assert publish["if"] == "github.event_name == 'push' && github.ref_type == 'tag'"
+
+
+def test_the_package_job_builds_the_installer_with_the_full_smoke_test_on_every_run() -> None:
+    """PRs and main prove the release build before any tag exists."""
+    package = workflow("release.yml")["jobs"]["package"]
+    lines = run_lines(package)
+
+    assert "if" not in package
+    assert lines.index("make dev-install") < lines.index("make package")
+    assert any("apt-get install" in line and "makeself" in line for line in lines)
+    (upload,) = step_using(package, "actions/upload-artifact@")
+    assert upload["with"]["path"] == "dist/dstui-install.sh"
+    assert upload["with"]["if-no-files-found"] == "error"
+
+
+def test_a_tag_that_does_not_match_the_pyproject_version_fails_before_the_build() -> None:
+    package = workflow("release.yml")["jobs"]["package"]
+    names = [step.get("name", "") for step in steps(package)]
+    check = next(step for step in steps(package) if "GITHUB_REF_NAME" in step.get("run", ""))
+
+    assert check["if"] == "github.ref_type == 'tag'"
+    assert "pyproject.toml" in check["run"]
+    assert names.index(check["name"]) < next(
+        i for i, step in enumerate(steps(package)) if step.get("run") == "make package"
+    )
+
+
+def test_the_publish_job_attests_both_assets_before_releasing_them() -> None:
+    publish = workflow("release.yml")["jobs"]["publish"]
+    all_steps = steps(publish)
+
+    (attest,) = step_using(publish, ATTEST_ACTION)
+    assert attest["with"]["subject-path"].split() == RELEASE_ASSETS
+    release = next(step for step in all_steps if "gh release create" in step.get("run", ""))
+    assert all_steps.index(attest) < all_steps.index(release)
+    assert release["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert (
+        'gh release create "$TAG" --verify-tag --title "dstui $TAG" --notes-file "$NOTES" '
+        + " ".join(RELEASE_ASSETS)
+    ) in " ".join(release["run"].split())
+    notes = next(step for step in all_steps if "release-notes.sh" in step.get("run", ""))
+    assert all_steps.index(notes) < all_steps.index(release)
+
+
+def test_no_other_workflow_attests_or_publishes() -> None:
+    for path in WORKFLOWS.glob("*.yml"):
+        if path.name == "release.yml":
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert ATTEST_ACTION not in text, path.name
+        assert "gh release" not in text, path.name
+        assert "id-token" not in text, path.name
