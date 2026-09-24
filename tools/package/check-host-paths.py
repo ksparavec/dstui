@@ -1,16 +1,19 @@
 """Fail if the staged payload discloses the build host.
 
-    python -I check-host-paths.py STAGE_DIR PATTERN [PATTERN ...]
+    python -I check-host-paths.py REQUIREMENTS STAGE_DIR PATTERN [PATTERN ...]
 
 build-binary.sh passes the build's own paths as fixed-string PATTERNs: the uv-managed CPython
 it staged, the project checkout and $HOME/. Every regular file under STAGE_DIR is searched
 for each of them, and so is every symlink's target (the tar stores it).
 
-A file byte-identical to what its wheel shipped is exempt, because it is upstream content
-from a hash-pinned wheel and cannot disclose this build host. pydantic_core's CycloneDX SBOM,
-for example, names pydantic's own CI checkout (/home/runner/work/pydantic/...), and $HOME/
-is /home/runner/ on a GitHub runner. Such a file is listed in a *.dist-info/RECORD with a
-sha256 that matches it. It is still reported on stdout as upstream content, never as a leak.
+A file byte-identical to what a wheel pinned in REQUIREMENTS shipped is exempt, because it is
+upstream content from a hash-pinned wheel and cannot disclose this build host. pydantic_core's
+CycloneDX SBOM, for example, names pydantic's own CI checkout (/home/runner/work/pydantic/...),
+and $HOME/ is /home/runner/ on a GitHub runner. Such a file is listed in the RECORD of a
+*.dist-info whose distribution REQUIREMENTS pins, with a sha256 that matches it. It is still
+reported on stdout as upstream content, never as a leak. No other RECORD vouches for anything:
+not the dstui wheel's, which is built from the checkout on this host, and not one that is not
+the UTF-8 CSV pip writes.
 
 These are not exempt, even when their hash matches:
   - pip's own install-time files, which pip rehashes into RECORD: INSTALLER, REQUESTED and
@@ -32,15 +35,33 @@ import base64
 import csv
 import hashlib
 import os
+import re
 import sys
 from collections.abc import Iterator
 
-USAGE = "usage: check-host-paths.py STAGE_DIR PATTERN [PATTERN ...]"
+USAGE = "usage: check-host-paths.py REQUIREMENTS STAGE_DIR PATTERN [PATTERN ...]"
 INSTALLER_WRITTEN = frozenset({"INSTALLER", "REQUESTED", "direct_url.json", "RECORD"})
+PINNED = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==", re.MULTILINE)
+
+
+def normalized(name: str) -> str:
+    """PEP 503: case-insensitive, and every run of -, _ and . is one -."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def pinned_names(requirements: str) -> frozenset[str]:
+    """The distributions requirements.txt pins (NAME==VERSION), which pip installs hash-checked."""
+    with open(requirements, encoding="utf-8") as f:
+        return frozenset(normalized(match[1]) for match in PINNED.finditer(f.read()))
 
 
 def is_dist_info(path: str) -> bool:
     return os.path.basename(path).endswith(".dist-info")
+
+
+def dist_name(dist_info: str) -> str:
+    """NAME of NAME-VERSION.dist-info, normalized."""
+    return normalized(os.path.basename(dist_info).removesuffix(".dist-info").rpartition("-")[0])
 
 
 def walk(top: str) -> Iterator[tuple[str, list[str], list[str]]]:
@@ -52,29 +73,42 @@ def walk(top: str) -> Iterator[tuple[str, list[str], list[str]]]:
     return os.walk(top, onerror=fail)
 
 
+def record_rows(dist_info: str) -> list[list[str]]:
+    """``dist_info``/RECORD's rows; none when it is not the UTF-8 CSV pip writes."""
+    with open(os.path.join(dist_info, "RECORD"), encoding="utf-8", newline="") as f:
+        try:
+            return list(csv.reader(f))
+        except UnicodeDecodeError, csv.Error:
+            return []
+
+
 def record_digests(site_dir: str, dist_info: str) -> Iterator[tuple[str, str]]:
     """(absolute path, sha256 digest) for the rows of ``dist_info``/RECORD that can exempt a
     file: hashed with sha256, inside ``site_dir``, and not pip's install-time metadata of any
     distribution."""
-    with open(os.path.join(dist_info, "RECORD"), encoding="utf-8", newline="") as f:
-        for row in csv.reader(f):
-            if len(row) < 2 or not row[1].startswith("sha256="):
-                continue
-            path = os.path.normpath(os.path.join(site_dir, row[0]))
-            if os.path.commonpath([site_dir, path]) != site_dir:
-                continue
-            if os.path.basename(path) in INSTALLER_WRITTEN and is_dist_info(os.path.dirname(path)):
-                continue
-            yield path, row[1].removeprefix("sha256=").rstrip("=")
+    for row in record_rows(dist_info):
+        if len(row) < 2 or not row[1].startswith("sha256="):
+            continue
+        path = os.path.normpath(os.path.join(site_dir, row[0]))
+        if os.path.commonpath([site_dir, path]) != site_dir:
+            continue
+        if os.path.basename(path) in INSTALLER_WRITTEN and is_dist_info(os.path.dirname(path)):
+            continue
+        yield path, row[1].removeprefix("sha256=").rstrip("=")
 
 
-def verbatim_digests(stage: str) -> dict[str, set[str]]:
-    """Every file path any RECORD under ``stage`` vouches for, with the digests it may have."""
+def verbatim_digests(stage: str, pinned: frozenset[str]) -> dict[str, set[str]]:
+    """Every file path the RECORD of a ``pinned`` distribution under ``stage`` vouches for,
+    with the digests it may have."""
     digests: dict[str, set[str]] = {}
     for dirpath, dirnames, _filenames in walk(stage):
         for name in dirnames:
             dist_info = os.path.join(dirpath, name)
-            if is_dist_info(name) and os.path.isfile(os.path.join(dist_info, "RECORD")):
+            if (
+                is_dist_info(name)
+                and dist_name(name) in pinned
+                and os.path.isfile(os.path.join(dist_info, "RECORD"))
+            ):
                 for path, digest in record_digests(dirpath, dist_info):
                     digests.setdefault(path, set()).add(digest)
     return digests
@@ -102,14 +136,17 @@ def payload(stage: str) -> Iterator[tuple[str, bytes, bytes | None]]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or not all(argv[1:]):
+    if len(argv) < 3 or not all(argv):
         print(USAGE, file=sys.stderr)
         return 2
-    if not os.path.isdir(argv[0]):
-        print(f"check-host-paths.py: not a directory: {argv[0]}", file=sys.stderr)
+    if not os.path.isfile(argv[0]):
+        print(f"check-host-paths.py: not a file: {argv[0]}", file=sys.stderr)
         return 2
-    stage, patterns = os.path.abspath(argv[0]), argv[1:]
-    verbatim = verbatim_digests(stage)
+    if not os.path.isdir(argv[1]):
+        print(f"check-host-paths.py: not a directory: {argv[1]}", file=sys.stderr)
+        return 2
+    stage, patterns = os.path.abspath(argv[1]), argv[2:]
+    verbatim = verbatim_digests(stage, pinned_names(argv[0]))
     leaks: list[str] = []
     upstream: list[str] = []
     exempt = 0

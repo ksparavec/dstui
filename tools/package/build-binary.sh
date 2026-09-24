@@ -255,12 +255,13 @@ PYEOF
     || { echo "ERROR: sourceless bundle not importable" >&2; exit 1; }
 
 # The payload must not disclose the build host (account name, directory layout). Files
-# verified byte for byte against their wheel's RECORD are upstream content and exempt:
-# pydantic_core's SBOM names pydantic's CI checkout, /home/runner/work/..., which is under
-# $HOME/ on a GitHub runner. Whatever the build or pip wrote stays scanned.
+# verified byte for byte against the RECORD of a wheel pinned in requirements.txt are upstream
+# content and exempt: pydantic_core's SBOM names pydantic's CI checkout, /home/runner/work/...,
+# which is under $HOME/ on a GitHub runner. Whatever the build or pip wrote stays scanned,
+# the dstui wheel built from the checkout included.
 leak_patterns=("$BASEP" "$ROOT/")
 case "${HOME:-/}" in /) ;; *) leak_patterns+=("$HOME/") ;; esac
-"$PY" -I "$CHECK_HOST_PATHS" "$STAGE" "${leak_patterns[@]}"
+"$PY" -I "$CHECK_HOST_PATHS" "$REQ" "$STAGE" "${leak_patterns[@]}"
 
 # --- 8. Obtain a static zstd (cached across builds) --------------------
 # Reused only while it is the pinned version and static (no program interpreter);
