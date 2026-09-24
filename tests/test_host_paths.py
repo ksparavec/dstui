@@ -4,9 +4,10 @@ build-binary.sh searches the staged tree for the build's own paths: the uv-manag
 copied, the project checkout and ``$HOME/``. On a GitHub runner ``$HOME`` is /home/runner, and
 pydantic_core's CycloneDX SBOM names pydantic's own CI checkout (/home/runner/work/pydantic/...):
 upstream bytes that pip installed from a hash-pinned wheel, which cannot disclose this build host.
-So a file listed in a ``*.dist-info/RECORD`` with a sha256 that matches it is exempt. Everything the
-build or pip writes stays scanned: the compiled .pyc, _sysconfigdata, the launcher, the installer
-metadata pip rehashes into RECORD, and every file that is in no RECORD or differs from it.
+So a file listed with a matching sha256 in the ``*.dist-info/RECORD`` of a distribution that
+requirements.txt pins is exempt. Everything the build or pip writes stays scanned: the dstui wheel
+built from the checkout, the compiled .pyc, _sysconfigdata, the launcher, the installer metadata
+pip rehashes into RECORD, and every file that is in no such RECORD or differs from it.
 """
 
 from __future__ import annotations
@@ -31,6 +32,16 @@ CI_ROOT = "/home/runner/work/dstui/dstui/"
 CI_HOME = "/home/runner/"
 CI_PATTERNS = (CI_BASEP, CI_ROOT, CI_HOME)
 
+# The hash-pinned lock the build installs --require-hashes, in uv pip compile's layout.
+LOCK = """\
+other==1.0 \\
+    --hash=sha256:0000
+pydantic-core==2.46.5 \\
+    --hash=sha256:0000
+    # via pydantic
+pygments==2.21.0 \\
+    --hash=sha256:0000
+"""
 SBOM = "pydantic_core-2.46.5.dist-info/sboms/pydantic-core.cyclonedx.json"
 SBOM_TEXT = '{"bom-ref": "path+file:///home/runner/work/pydantic/pydantic/pydantic-core#2.46.5"}\n'
 LAUNCHER = "#!/home/runner/work/dstui/dstui/dist/.build/python/bin/python3.14\nimport dstui\n"
@@ -68,7 +79,8 @@ def verbatim_row(rel: str, text: str) -> str:
 def make_stage(root: Path) -> Path:
     """A clean staged tree as build-binary.sh leaves it before the gate: sourceless (the RECORD
     still lists the deleted .py), the launcher and sysconfig data rewritten to /install, and
-    pydantic_core's upstream SBOM verbatim from its wheel."""
+    pydantic_core's upstream SBOM verbatim from its wheel. The lock is next to it."""
+    (root / "requirements.txt").write_text(LOCK, encoding="utf-8")
     stage = root / "stage"
     lib = stage / "python" / "lib" / f"python{MINOR}"
     lib.mkdir(parents=True)
@@ -88,8 +100,9 @@ def make_stage(root: Path) -> Path:
 
 
 def run_gate(stage: Path, *patterns: str) -> subprocess.CompletedProcess[str]:
+    lock = stage.parent / "requirements.txt"
     return run_script(
-        [sys.executable, "-I", str(CHECK_HOST_PATHS), str(stage), *patterns],
+        [sys.executable, "-I", str(CHECK_HOST_PATHS), str(lock), str(stage), *patterns],
         {"PATH": SYSTEM_PATH},
     )
 
@@ -179,13 +192,13 @@ def test_a_record_entry_without_a_hash_exempts_nothing(tmp_path: Path) -> None:
 def test_a_script_record_entry_resolves_outside_site_packages_and_is_scanned(
     tmp_path: Path,
 ) -> None:
-    """pip lists the console-script launcher it generates as ../../../bin/dstui with a hash of
-    what it wrote: the staging interpreter's path. The build must rewrite it, so a launcher that
-    still matches its RECORD row is a leak, not upstream content."""
+    """pip lists each console-script launcher it generates (../../../bin/dstui, or a pinned
+    dependency's such as pygmentize) with a hash of what it wrote: the staging interpreter's
+    path. A launcher that still matches its RECORD row is a leak, not upstream content."""
     stage = make_stage(tmp_path)
-    launcher = stage / "python" / "bin" / "dstui"
+    launcher = stage / "python" / "bin" / "pygmentize"
     launcher.write_text(LAUNCHER, encoding="utf-8")
-    install(stage, "dstui-0.1.0", {}, [verbatim_row("../../../bin/dstui", LAUNCHER)])
+    install(stage, "pygments-2.21.0", {}, [verbatim_row("../../../bin/pygmentize", LAUNCHER)])
 
     result = run_gate(stage, *CI_PATTERNS)
 
@@ -193,7 +206,9 @@ def test_a_script_record_entry_resolves_outside_site_packages_and_is_scanned(
     assert leak_lines(result) == [f"  {launcher}: {CI_ROOT}, {CI_HOME}"]
 
 
-@pytest.mark.parametrize("lister", ["dstui-0.1.0", "other-1.0"], ids=["own-record", "other-record"])
+@pytest.mark.parametrize(
+    "lister", ["pygments-2.21.0", "other-1.0"], ids=["own-record", "other-record"]
+)
 @pytest.mark.parametrize("name", ["direct_url.json", "INSTALLER", "REQUESTED"])
 def test_installer_metadata_pip_rehashes_into_record_is_scanned(
     name: str, lister: str, tmp_path: Path
@@ -202,8 +217,8 @@ def test_installer_metadata_pip_rehashes_into_record_is_scanned(
     build host) and records their hashes: they match, but are not what the wheel shipped. That
     holds whichever RECORD lists them."""
     stage = make_stage(tmp_path)
-    rel = f"dstui-0.1.0.dist-info/{name}"
-    text = f'{{"url": "file://{CI_ROOT}dist/dstui-0.1.0-py3-none-any.whl"}}'
+    rel = f"pygments-2.21.0.dist-info/{name}"
+    text = f'{{"url": "file://{CI_ROOT}dist/pygments-2.21.0-py3-none-any.whl"}}'
     install(stage, lister, {rel: text}, [verbatim_row(rel, text)])
 
     result = run_gate(stage, *CI_PATTERNS)
@@ -245,6 +260,42 @@ def test_a_symlink_to_a_build_host_path_is_caught(tmp_path: Path) -> None:
     assert leak_lines(result) == [f"  {link} -> {CI_BASEP}/ssl/cert.pem: {CI_BASEP}, {CI_HOME}"]
 
 
+def test_a_file_of_the_wheel_built_here_is_scanned_although_it_matches_its_record(
+    tmp_path: Path,
+) -> None:
+    """Only the wheels pinned in requirements.txt are upstream. dstui's own wheel is built from
+    the checkout on the build host, and hatchling hashes whatever it packs (package data,
+    METADATA from README.md) into its RECORD: a checkout path in any of it is a leak."""
+    stage = make_stage(tmp_path)
+    rel = "dstui/build-info.txt"
+    text = f"built from {CI_ROOT}src\n"
+    install(stage, "dstui-0.1.0", {rel: text}, [verbatim_row(rel, text)])
+
+    result = run_gate(stage, *CI_PATTERNS)
+
+    assert result.returncode == 1
+    assert leak_lines(result) == [f"  {site_packages(stage) / rel}: {CI_ROOT}, {CI_HOME}"]
+
+
+@pytest.mark.parametrize(
+    "garbage", [b"caf\xe9.txt,,\n", b"x" * 200_000 + b",,\n"], ids=["not-utf-8", "oversized-field"]
+)
+def test_a_record_that_is_not_pips_csv_exempts_nothing_and_does_not_crash_the_gate(
+    garbage: bytes, tmp_path: Path
+) -> None:
+    """RECORD is UTF-8 CSV. One that cannot be read as such vouches for none of its rows, so the
+    files it lists are searched like any other: never a traceback, never an exemption."""
+    stage = make_stage(tmp_path)
+    record = site_packages(stage) / "pydantic_core-2.46.5.dist-info" / "RECORD"
+    with record.open("ab") as f:
+        f.write(garbage)
+
+    result = run_gate(stage, *CI_PATTERNS)
+
+    assert result.returncode == 1
+    assert leak_lines(result) == [f"  {site_packages(stage) / SBOM}: {CI_HOME}"]
+
+
 def test_a_stage_without_any_match_passes(tmp_path: Path) -> None:
     stage = make_stage(tmp_path)
 
@@ -259,12 +310,31 @@ def test_a_stage_without_any_match_passes(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "args",
-    [[], ["stage"], ["stage", ""], ["stage", CI_HOME, ""], ["missing", CI_HOME]],
-    ids=["none", "no-pattern", "empty-pattern", "one-empty-pattern", "not-a-directory"],
+    [
+        [],
+        ["requirements.txt", "stage"],
+        ["stage", CI_HOME],
+        ["requirements.txt", "stage", ""],
+        ["requirements.txt", "stage", CI_HOME, ""],
+        ["", "stage", CI_HOME],
+        ["missing", "stage", CI_HOME],
+        ["requirements.txt", "missing", CI_HOME],
+    ],
+    ids=[
+        "none",
+        "no-pattern",
+        "no-requirements",
+        "empty-pattern",
+        "one-empty-pattern",
+        "empty-requirements",
+        "requirements-not-a-file",
+        "stage-not-a-directory",
+    ],
 )
 def test_check_host_paths_rejects_bad_usage(args: list[str], tmp_path: Path) -> None:
     make_stage(tmp_path)
-    argv = [str(tmp_path / arg) if arg in {"stage", "missing"} else arg for arg in args]
+    paths = {"requirements.txt", "stage", "missing"}
+    argv = [str(tmp_path / arg) if arg in paths else arg for arg in args]
 
     result = run_script([sys.executable, "-I", str(CHECK_HOST_PATHS), *argv], {"PATH": SYSTEM_PATH})
 
