@@ -19,11 +19,16 @@ RUNTIME_DIST = "deepseek-harness-runtime-bin"
 # --------------------------------------------------------------------------------- consistency
 
 
-def test_python_version_file_matches_the_requires_python_floor() -> None:
-    pinned = (ROOT / ".python-version").read_text().strip()
+def test_python_version_file_pins_an_exact_cpython_on_the_requires_python_floor() -> None:
+    """.python-version is the one exact pin (dev venv, CI, the bundled interpreter); the package
+    metadata keeps the X.Y floor."""
+    pinned = (ROOT / ".python-version").read_text()
 
-    assert PYPROJECT["project"]["requires-python"] == f">={pinned}"
-    assert f"Programming Language :: Python :: {pinned}" in PYPROJECT["project"]["classifiers"]
+    match = re.fullmatch(r"(3\.\d+)\.\d+\n?", pinned)
+    assert match is not None, f".python-version must be a full X.Y.Z, got {pinned!r}"
+    minor = match.group(1)
+    assert PYPROJECT["project"]["requires-python"] == f">={minor}"
+    assert f"Programming Language :: Python :: {minor}" in PYPROJECT["project"]["classifiers"]
 
 
 def test_pyproject_version_is_what_dstui_version_prints(tmp_path: Path) -> None:
