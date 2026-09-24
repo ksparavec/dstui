@@ -45,6 +45,14 @@ Run `make lock` and `make dev-install` first.
   `lib/pkgconfig` are dropped. `tools/package/check-python.sh` (tested in
   `tests/test_bundle_python.py`) fails the build unless the staged interpreter reports exactly
   `.python-version`, no `libpython*` is left, and no ELF in the tree NEEDs one (`readelf -d`).
+- **No build-host paths in the payload.** `tools/package/check-host-paths.py` (tested in
+  `tests/test_host_paths.py`) fails the build when a staged file or symlink target contains the
+  uv CPython's path, the checkout or `$HOME/`, and names the file and the pattern.
+  - Exempt: a file byte-identical to what its wheel shipped (a sha256 match in its
+    `*.dist-info/RECORD`), which is only noted. pydantic_core's SBOM names pydantic's own CI
+    checkout under `/home/runner/`, which is `$HOME` on a GitHub runner.
+  - Still scanned, although pip hashes them into RECORD: `INSTALLER`, `REQUESTED`,
+    `direct_url.json` and every `../` entry (the launcher pip generates).
 - **Never ship the DeepSeek runtime or Node.** DeepSeek Harness (`dsh`, npm `@deepseek-ai/dsh`,
   Node >= 22.19) is installed separately.
   - `deepseek-harness-runtime-bin` is a **test-only** dev-extra dependency.
