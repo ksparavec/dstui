@@ -16,6 +16,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lock files, so a plain `make lock` never upgraded one (past an advisory, say).
   `LOCK_ARGS` passes uv flags to every lock: `make lock
   LOCK_ARGS='--upgrade-package textual'`, or `--upgrade` to re-resolve everything.
+- **A module that does not compile fails `make package`.** The precompile step
+  discarded every error, and the sourceless step then deletes all `.py` files, so
+  such a module would have been silently missing from the installer. The build
+  now stops with the compiler's error. (Everything compiles today.)
 
 ## [0.1.0] - 2026-09-24
 

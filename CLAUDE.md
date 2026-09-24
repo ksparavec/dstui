@@ -24,7 +24,9 @@
 `make package` builds `dist/dstui-install.sh` (`tools/package/build-binary.sh`), a **makeself**
 self-extracting installer for **linux-x86_64 (glibc)**, about 22 MB. It follows the method of
 devitops-com/aiagent:
-- a bundled uv-managed CPython, **sourceless** (`.pyc` only)
+- a bundled uv-managed CPython, **sourceless** (`.pyc` only; any compile error fails the build,
+  because the `.py` files are deleted next and a module that did not compile would silently be
+  missing; tested with the real `build-binary.sh` and fake tools in `tests/test_bundle_python.py`)
 - a **zstd -19** payload, unpacked by a bundled static zstd
 - SHA256 integrity checking and an **`-I`** (isolated) launcher; only `dstui` goes on PATH
 
