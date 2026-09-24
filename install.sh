@@ -18,16 +18,33 @@
 #   DSTUI_VERSION  release tag to install (default: latest), e.g. v0.1.0
 #   TMPDIR         where the installer is downloaded and unpacked (default /var/tmp,
 #                  never /tmp: that is often a small RAM-backed tmpfs)
+#   DSTUI_VERIFY   1: before running the downloaded installer, verify its GitHub
+#                  artifact attestation (the release workflow built it from this
+#                  repository) with `gh attestation verify`. Needs the GitHub CLI
+#                  (gh) on PATH, logged in. Any failure, or no gh, stops here: the
+#                  installer is not run. Default 0 (no check).
 #
-# Custom prefix with the pipe form:
+# Custom prefix, or verification, with the pipe form:
 #   curl -fsSL .../install.sh | DSTUI_PREFIX=/usr/local sh
+#   curl -fsSL .../install.sh | DSTUI_VERIFY=1 sh
 set -eu
 
 REPO="ksparavec/dstui"
 ASSET="dstui-install.sh"
 VERSION="${DSTUI_VERSION:-latest}"
+VERIFY="${DSTUI_VERIFY:-0}"
 TMPDIR="${TMPDIR:-/var/tmp}"
 export TMPDIR   # the makeself installer unpacks its payload under $TMPDIR too
+
+# Fail closed: a verification that was asked for is never skipped quietly.
+case "$VERIFY" in
+    0|1) ;;
+    *) echo "dstui: DSTUI_VERIFY must be 1 or 0, got '${VERIFY}'" >&2; exit 1 ;;
+esac
+if [ "$VERIFY" = 1 ] && ! command -v gh >/dev/null 2>&1; then
+    echo "dstui: DSTUI_VERIFY=1 needs the GitHub CLI (gh) on PATH: https://cli.github.com" >&2
+    exit 1
+fi
 
 # The bundle is a linux-x86_64 build; fail fast anywhere else.
 OS="$(uname -s)"
@@ -60,6 +77,14 @@ echo "dstui: downloading ${URL}" >&2
 if ! dl "$URL" "$TMP"; then
     echo "dstui: download failed (${URL})" >&2
     exit 1
+fi
+
+if [ "$VERIFY" = 1 ]; then
+    echo "dstui: verifying the build provenance attestation (gh attestation verify)" >&2
+    if ! gh attestation verify "$TMP" --repo "$REPO" >&2; then
+        echo "dstui: attestation verification failed; the installer was not run" >&2
+        exit 1
+    fi
 fi
 
 echo "dstui: running installer" >&2

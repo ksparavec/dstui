@@ -195,6 +195,106 @@ def test_install_sh_names_the_repo_once_and_says_dsh_is_separate() -> None:
     assert "@deepseek-ai/dsh" in text  # the header says dsh is a separate install
 
 
+# ------------------------------------------------------------------ install.sh: DSTUI_VERIFY=1
+
+
+def write_fake_gh(bin_dir: Path, rc: int = 0) -> None:
+    """A gh that logs its arguments, one per line, and keeps a copy of the file it checked."""
+    write_program(
+        bin_dir / "gh",
+        'printf "%s\\n" "$@" > "$FAKE_GH_LOG"\n'
+        '[ ! -f "$3" ] || cp "$3" "$FAKE_GH_LOG.subject"\n'
+        f"exit {rc}\n",
+    )
+
+
+def gh_env(tmp_path: Path, bin_dir: Path, **extra: str) -> dict[str, str]:
+    return install_env(tmp_path, bin_dir, FAKE_GH_LOG=str(tmp_path / "gh.log"), **extra)
+
+
+def downloads_left(tmp_path: Path) -> list[str]:
+    return [p.name for p in tmp_path.iterdir() if p.name.startswith("dstui-install")]
+
+
+def test_install_sh_verifies_the_attestation_before_running_the_installer(
+    tmp_path: Path, fake_bin: Path
+) -> None:
+    write_fake_gh(fake_bin)
+
+    result = run_install(gh_env(tmp_path, fake_bin, DSTUI_VERIFY="1"))
+
+    assert result.returncode == 0, result.stderr
+    installer = installer_report(result.stdout)["installer"]
+    gh_args = (tmp_path / "gh.log").read_text().splitlines()
+    assert gh_args == ["attestation", "verify", installer, "--repo", "ksparavec/dstui"]
+    assert 'echo "installer=$0"' in (tmp_path / "gh.log.subject").read_text()  # the download
+    assert downloads_left(tmp_path) == []
+
+
+def test_install_sh_does_not_run_an_installer_that_fails_verification(
+    tmp_path: Path, fake_bin: Path
+) -> None:
+    write_fake_gh(fake_bin, rc=1)
+
+    result = run_install(gh_env(tmp_path, fake_bin, DSTUI_VERIFY="1"))
+
+    assert result.returncode == 1
+    assert "installer=" not in result.stdout  # never executed
+    assert "attestation verification failed" in result.stderr
+    assert (tmp_path / "gh.log").exists()
+    assert downloads_left(tmp_path) == []  # and removed
+
+
+def test_install_sh_verify_without_gh_fails_before_downloading(
+    tmp_path: Path, fake_bin: Path
+) -> None:
+    """A PATH with only what install.sh needs (the system dirs may hold a real gh)."""
+    bin_dir = tmp_path / "no-gh-bin"
+    bin_dir.mkdir()
+    for fake in ("uname", "curl"):
+        shutil.copy2(fake_bin / fake, bin_dir / fake)
+    for tool in ("sh", "mktemp", "rm", "cat"):
+        (bin_dir / tool).symlink_to(shutil.which(tool) or tool)
+    env = install_env(tmp_path, fake_bin, DSTUI_VERIFY="1") | {"PATH": str(bin_dir)}
+
+    result = run_install(env)
+
+    assert result.returncode == 1
+    assert "DSTUI_VERIFY=1 needs the GitHub CLI (gh)" in result.stderr
+    assert "installer=" not in result.stdout
+    assert not (tmp_path / "curl.log").exists()  # nothing downloaded
+    assert downloads_left(tmp_path) == []
+
+
+@pytest.mark.parametrize("value", [None, "", "0"], ids=["unset", "empty", "zero"])
+def test_install_sh_without_dstui_verify_never_calls_gh(
+    value: str | None, tmp_path: Path, fake_bin: Path
+) -> None:
+    write_fake_gh(fake_bin, rc=1)
+    extra = {} if value is None else {"DSTUI_VERIFY": value}
+
+    result = run_install(gh_env(tmp_path, fake_bin, **extra))
+
+    assert result.returncode == 0, result.stderr
+    assert "installer=" in result.stdout
+    assert not (tmp_path / "gh.log").exists()
+
+
+@pytest.mark.parametrize("value", ["yes", "true", "2"])
+def test_install_sh_refuses_an_unknown_dstui_verify_value(
+    value: str, tmp_path: Path, fake_bin: Path
+) -> None:
+    """Fail closed: a typo must not silently skip the verification that was asked for."""
+    write_fake_gh(fake_bin)
+
+    result = run_install(gh_env(tmp_path, fake_bin, DSTUI_VERIFY=value))
+
+    assert result.returncode == 1
+    assert f"DSTUI_VERIFY must be 1 or 0, got '{value}'" in result.stderr
+    assert not (tmp_path / "curl.log").exists()
+    assert not (tmp_path / "gh.log").exists()
+
+
 # ------------------------------------------------------------------------ installer startup
 
 FOREIGN_ID = 4242  # the archive's owner: a uid/gid that means nothing on the installing host
