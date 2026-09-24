@@ -1,20 +1,25 @@
 """The installer: install.sh, the makeself startup script, check-no-runtime.sh, verify-versions.py.
 
 Hermetic and fast: fake ``uname`` / ``curl`` / ``wget`` / ``zstd`` executables, a plain tar as
-the payload and everything else under ``tmp_path``. Nothing reaches GitHub.
+the payload and everything else under ``tmp_path``. Nothing reaches GitHub: the one test that runs
+the real curl sends it to local servers.
 """
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import io
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 
@@ -153,18 +158,23 @@ def curl_args(tmp_path: Path) -> list[str]:
     return (tmp_path / "curl.log").read_text().splitlines()
 
 
-def test_install_sh_downloads_over_https_only_with_curl(tmp_path: Path, fake_bin: Path) -> None:
-    """No redirect may downgrade the download to plain HTTP (as rustup and uv do it)."""
+def test_install_sh_downloads_with_curl_restricted_to_https(tmp_path: Path, fake_bin: Path) -> None:
+    """--proto '=https' holds for every redirect too (GitHub redirects release downloads to its
+    CDN), so none can downgrade the download to plain HTTP; as rustup and uv do it."""
     result = run_install(install_env(tmp_path, fake_bin))
 
     assert result.returncode == 0, result.stderr
-    args = curl_args(tmp_path)
-    assert args[args.index("--proto") + 1] == "=https"
-    assert "--tlsv1.2" in args
+    installer = installer_report(result.stdout)["installer"]
+    assert curl_args(tmp_path) == [
+        "--proto", "=https", "--tlsv1.2", "-fsSL",
+        f"{RELEASES}/latest/download/dstui-install.sh", "-o", installer,
+    ]  # fmt: skip
 
 
-def test_install_sh_falls_back_to_wget_over_https_only(tmp_path: Path, fake_bin: Path) -> None:
-    """A PATH without curl: only the tools install.sh needs, and a fake wget."""
+def test_install_sh_falls_back_to_wget_without_curl(tmp_path: Path, fake_bin: Path) -> None:
+    """A PATH without curl: only the tools install.sh needs, and a fake wget. wget has no option
+    that keeps redirects on HTTPS (--https-only only applies to recursive downloads), so none is
+    passed as if it did; DSTUI_VERIFY=1 checks what either tool downloaded."""
     bin_dir = tmp_path / "wget-bin"
     bin_dir.mkdir()
     shutil.copy2(fake_bin / "uname", bin_dir / "uname")
@@ -181,10 +191,128 @@ def test_install_sh_falls_back_to_wget_over_https_only(tmp_path: Path, fake_bin:
     result = run_install(env)
 
     assert result.returncode == 0, result.stderr
-    args = curl_args(tmp_path)  # the fake wget logs to the same file
-    assert "--https-only" in args
-    assert f"{RELEASES}/latest/download/dstui-install.sh" in args
-    assert "installer=" in result.stdout
+    installer = installer_report(result.stdout)["installer"]
+    assert curl_args(tmp_path) == [  # the fake wget logs to the same file
+        "-qO", installer, f"{RELEASES}/latest/download/dstui-install.sh"
+    ]  # fmt: skip
+
+
+# ------------------------------------------------ install.sh: the real curl against local servers
+
+RELEASE_PATH = "/ksparavec/dstui/releases/latest/download/dstui-install.sh"
+CDN_PATH = "/cdn/dstui-install.sh"
+SERVED_INSTALLER = b'echo "installer ran"\n'
+OPENSSL = shutil.which("openssl")
+CURL = shutil.which("curl", path=SYSTEM_PATH)
+
+
+def recording_handler(redirects: dict[str, str], hits: list[str]) -> type[BaseHTTPRequestHandler]:
+    """Records each GET path in ``hits``; redirects the paths in ``redirects`` (302), serves
+    :data:`SERVED_INSTALLER` for any other."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            hits.append(self.path)
+            location = redirects.get(self.path)
+            body = b"" if location else SERVED_INSTALLER
+            self.send_response(302 if location else 200)
+            if location:
+                self.send_header("Location", location)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            """Quiet: the hits are recorded instead."""
+
+    return Handler
+
+
+@contextlib.contextmanager
+def serving(server: ThreadingHTTPServer) -> Iterator[int]:
+    """Serve on a daemon thread; yield the port."""
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def local_github(tmp_path: Path, hits: list[str], redirects: dict[str, str]) -> ThreadingHTTPServer:
+    """An HTTPS server with a self-signed certificate for github.com (made by openssl)."""
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    subprocess.run(
+        [OPENSSL or "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
+         "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1", "-subj", "/CN=github.com",
+         "-addext", "subjectAltName=DNS:github.com", "-keyout", str(key), "-out", str(cert)],
+        check=True, capture_output=True,
+    )  # fmt: skip
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), recording_handler(redirects, hits))
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    return server
+
+
+def install_behind_a_redirect(
+    tmp_path: Path, fake_bin: Path, scheme: str
+) -> tuple[subprocess.CompletedProcess[str], list[str], list[str]]:
+    """install.sh with the real curl, offline: ~/.curlrc sends github.com to a local HTTPS server
+    (whose certificate it trusts) that redirects the release download, as GitHub does to its CDN,
+    to itself (``https``) or to a local plain HTTP server (``http``). Returns the result and the
+    paths each server was asked for."""
+    (fake_bin / "curl").unlink()  # the real one, from the system PATH
+    github_hits: list[str] = []
+    http_hits: list[str] = []
+    redirects: dict[str, str] = {}
+    github = local_github(tmp_path, github_hits, redirects)
+    plain = ThreadingHTTPServer(("127.0.0.1", 0), recording_handler({}, http_hits))
+    with serving(github) as github_port, serving(plain) as http_port:
+        cdn = "https://github.com" if scheme == "https" else f"http://127.0.0.1:{http_port}"
+        redirects[RELEASE_PATH] = cdn + CDN_PATH
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / ".curlrc").write_text(
+            f'connect-to = "github.com:443:127.0.0.1:{github_port}"\n'
+            f'cacert = "{tmp_path / "cert.pem"}"\n'
+        )
+        result = run_install(install_env(tmp_path, fake_bin))
+    return result, github_hits, http_hits
+
+
+needs_openssl_and_curl = pytest.mark.skipif(
+    OPENSSL is None or CURL is None, reason="needs openssl and curl"
+)
+
+
+@needs_openssl_and_curl
+def test_install_sh_lets_curl_follow_a_redirect_that_stays_on_https(
+    tmp_path: Path, fake_bin: Path
+) -> None:
+    """The control for the next test: the local servers and ~/.curlrc work."""
+    result, github_hits, _ = install_behind_a_redirect(tmp_path, fake_bin, "https")
+
+    assert result.returncode == 0, result.stderr
+    assert "installer ran" in result.stdout
+    assert github_hits == [RELEASE_PATH, CDN_PATH]
+
+
+@needs_openssl_and_curl
+def test_install_sh_lets_curl_refuse_a_redirect_to_plain_http(
+    tmp_path: Path, fake_bin: Path
+) -> None:
+    result, github_hits, http_hits = install_behind_a_redirect(tmp_path, fake_bin, "http")
+
+    assert result.returncode == 1
+    assert 'Protocol "http"' in result.stderr  # curl's refusal
+    assert "download failed" in result.stderr
+    assert "installer ran" not in result.stdout
+    assert github_hits == [RELEASE_PATH]
+    assert http_hits == []  # refused before connecting
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith("dstui-install")] == []
 
 
 def test_install_sh_names_the_repo_once_and_says_dsh_is_separate() -> None:

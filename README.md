@@ -36,6 +36,10 @@ PyPI (its package metadata carries the `Private :: Do Not Upload` classifier, wh
 
 ### Verify the download
 
+`install.sh` downloads with `curl --proto '=https'`, so no redirect can switch the download to
+plain HTTP. On a host without curl it falls back to wget, which cannot enforce that;
+`DSTUI_VERIFY=1` (below) checks the download either way.
+
 Every release is built by GitHub Actions, which also signs a
 [build provenance attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations)
 for both release files. With the [GitHub CLI](https://cli.github.com) (logged in), set
