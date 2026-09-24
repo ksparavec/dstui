@@ -83,9 +83,13 @@ Run `make lock` and `make dev-install` first.
 - **Installer invariants** are tested in `tests/test_installer.py`:
   - a root install is root-owned and readable by everyone
   - the payload contains no build-host paths
-  - a relative, whitespace or too-long prefix is resolved or refused before anything is unpacked
+  - a relative prefix is resolved; a whitespace or too-long prefix is refused before anything
+    is created (the prefix and its parents included)
   - a noexec `$TMPDIR` works
-  - the staged interpreter must run before an existing install is replaced
+  - the staged zstd (`--version`) and interpreter must run before an existing install is
+    replaced; a noexec prefix or a musl host means exit 1 with the reason, old install kept
+  - `-- --target` is refused. Plain `--target DIR` is makeself's own option: it extracts the
+    payload into DIR, keeps it and still installs into the default prefix
   - the extraction dir defaults to `/var/tmp`, never `/tmp`
   - `install.sh` with `DSTUI_VERIFY=1` runs the installer only after `gh attestation verify`
     succeeds (fails closed without `gh`)
