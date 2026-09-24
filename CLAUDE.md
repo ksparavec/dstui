@@ -133,3 +133,15 @@ the other installer fixes made here, to aiagent is deferred until dstui is done.
     runs without the embedded runtime.
   - `audit.yml` runs pip-audit on all three locks, daily and on every lock change.
   - `actions/setup-python` takes `.python-version`; 3.14.7 is in its versions manifest.
+- **Repository settings on GitHub** (configured by API; check with `gh api repos/ksparavec/dstui/rulesets`):
+  - Ruleset `main` (default branch): no deletion, no force-push. The CI checks `lint + types +
+    bandit`, `tests + coverage + wheel` and `installer + smoke test` are required, pinned to the
+    GitHub Actions app (id 15368), so change those job names only together with the ruleset.
+    `pip-audit` is not required (it only runs on lock changes).
+  - Ruleset `release-tags`: `v*` tags cannot be created, moved or deleted.
+  - Both rulesets let repository admins bypass (`always`), because `make release` pushes its
+    release commit straight to `main` and pushes the tag. Everyone else goes through a PR with
+    green checks.
+  - Immutable releases are on: from v0.1.1 on, a published release's assets and tag cannot change
+    (v0.1.0 predates the setting). `gh release create` with files uploads to a draft first,
+    which this allows.
