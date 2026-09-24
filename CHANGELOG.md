@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-24
+
 ### Added
 - **Chat with a DeepSeek Harness agent in the terminal.** A Textual UI on the
   official Python SDK (`deepseek-harness-sdk` 0.1.5rc1): replies render as
