@@ -78,7 +78,7 @@ package: ## Build the self-contained, precompiled installer -> dist/dstui-instal
 
 # --- Release ---
 
-release: ## Cut a release: promote CHANGELOG, rebuild installer, tag + push, publish GitHub release (version from pyproject.toml)
+release: ## Cut a release: promote CHANGELOG, tag + push; the tag makes CI build, attest and publish it (version from pyproject.toml)
 	@bash tools/release/release.sh
 
 # --- Cleanup ---
