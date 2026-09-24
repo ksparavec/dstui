@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import platform
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,7 +16,15 @@ import yaml
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from tests.helpers_scripts import PYPROJECT, ROOT, VERSION, run_script
+from tests.helpers_scripts import (
+    PINNED_PYTHON,
+    PYPROJECT,
+    ROOT,
+    SYSTEM_PATH,
+    VERSION,
+    run_script,
+    write_program,
+)
 
 RUNTIME_DIST = "deepseek-harness-runtime-bin"
 
@@ -110,6 +121,59 @@ def test_make_dev_install_installs_the_hash_locked_dev_dependencies() -> None:
     assert {"--no-deps", "--build-constraints", "requirements-build.txt", "-e", "."} <= set(
         install.split()
     )
+
+
+def run_make_dev_install(tmp_path: Path, uv_venv: str) -> subprocess.CompletedProcess[str]:
+    """``make dev-install`` on a copy of the Makefile and .python-version with a fake uv that logs
+    each call to ``uv.log`` and runs the shell code ``uv_venv`` for ``uv venv``."""
+    project = tmp_path / "project"
+    project.mkdir()
+    for name in ("Makefile", ".python-version"):
+        shutil.copy2(ROOT / name, project / name)
+    uv = write_program(
+        tmp_path / "bin" / "uv",
+        f'echo "$*" >> "{tmp_path / "uv.log"}"\n[ "$1" != venv ] || {{ {uv_venv}; }}\n',
+    )
+    return run_script(
+        ["make", "-s", "dev-install"], {"PATH": f"{uv.parent}:{SYSTEM_PATH}"}, cwd=project
+    )
+
+
+def uv_calls(tmp_path: Path) -> list[list[str]]:
+    return [line.split() for line in (tmp_path / "uv.log").read_text().splitlines()]
+
+
+def test_make_dev_install_recreates_the_venv_on_exactly_the_pinned_cpython(tmp_path: Path) -> None:
+    """A .venv made on another patch (before a pin bump, or on uv's floating 3.X link) must not
+    survive: the checks and tests would run on a CPython the installer does not ship."""
+    result = run_make_dev_install(tmp_path, uv_venv="exit 0")
+
+    assert result.returncode == 0, result.stderr
+    venv, *installs = uv_calls(tmp_path)
+    assert venv[0] == "venv"
+    assert "--clear" in venv
+    assert venv[venv.index("--python") + 1] == PINNED_PYTHON
+    assert [call[:2] for call in installs] == [["pip", "sync"], ["pip", "install"]]
+
+
+def test_make_dev_install_stops_with_uvs_reason_when_it_cannot_make_the_venv(
+    tmp_path: Path,
+) -> None:
+    """E.g. a uv too old to know the pinned CPython, or Python downloads disabled: uv's own error,
+    not a later, misleading one from installing into a venv that is not there (or is stale)."""
+    error = f"error: No download found for request: cpython-{PINNED_PYTHON}-linux-x86_64-gnu"
+
+    result = run_make_dev_install(tmp_path, uv_venv=f'echo "{error}" >&2; exit 2')
+
+    assert result.returncode != 0
+    assert error in result.stderr.splitlines()
+    assert [call[0] for call in uv_calls(tmp_path)] == ["venv"]
+
+
+def test_the_suite_runs_on_exactly_the_pinned_cpython() -> None:
+    """The tests run on the CPython the installer ships: CI's setup-python reads .python-version,
+    locally ``make dev-install`` makes the venv on it. After a pin bump, re-run dev-install."""
+    assert platform.python_version() == PINNED_PYTHON, "stale .venv? run `make dev-install`"
 
 
 def test_make_lock_also_pins_the_build_backend() -> None:
