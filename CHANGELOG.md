@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`install.sh` no longer claims an HTTPS-only download it cannot enforce with
+  wget.** Its `wget --https-only` only applies to recursive downloads, so it never
+  kept a redirect on HTTPS; the flag is gone. With curl (used whenever it is
+  installed) every redirect stays on HTTPS, as before. On a host with only wget,
+  `DSTUI_VERIFY=1` checks what it downloaded.
+
 ## [0.1.0] - 2026-09-24
 
 ### Added

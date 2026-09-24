@@ -54,11 +54,15 @@ if [ "$OS" != "Linux" ] || [ "$ARCH" != "x86_64" ]; then
     exit 1
 fi
 
-# HTTPS only, redirects included (GitHub redirects release downloads to its CDN).
+# HTTPS only, redirects included (GitHub redirects release downloads to its CDN):
+# curl's --proto '=https' holds for every redirect, so none can downgrade to plain HTTP.
+# wget has no option for that (--https-only applies to recursive downloads only), so it
+# is just the fallback for hosts without curl; DSTUI_VERIFY=1 checks what either one
+# downloaded before it runs.
 if command -v curl >/dev/null 2>&1; then
     dl() { curl --proto '=https' --tlsv1.2 -fsSL "$1" -o "$2"; }
 elif command -v wget >/dev/null 2>&1; then
-    dl() { wget --https-only -qO "$2" "$1"; }
+    dl() { wget -qO "$2" "$1"; }
 else
     echo "dstui: need curl or wget to download the installer" >&2
     exit 1

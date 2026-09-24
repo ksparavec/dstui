@@ -120,11 +120,14 @@ the other installer fixes made here, to aiagent is deferred until dstui is done.
     `gh release create vX.Y.Z --verify-tag --title "dstui vX.Y.Z" --notes-file …` with both
     files.
   - A concurrency group per ref builds a tag once.
-- **`install.sh`** is the `curl … | sh` bootstrap. It is HTTPS-only, honours `DSTUI_PREFIX` and
-  `DSTUI_VERSION`, and stages under `$TMPDIR` (default `/var/tmp`). `DSTUI_VERIFY=1` (opt-in)
-  runs `gh attestation verify <download> --repo ksparavec/dstui` first and fails closed: no `gh`,
-  a failed check or any other `DSTUI_VERIFY` value than `0`/`1` means exit 1, nothing run, the
-  download removed.
+- **`install.sh`** is the `curl … | sh` bootstrap. With curl it is HTTPS-only, redirects
+  included (`--proto '=https'`; a test runs the real curl against a local HTTPS server that
+  redirects to plain HTTP). The wget fallback cannot keep redirects on HTTPS (`--https-only` is
+  for recursive downloads only), so it passes no such flag; `DSTUI_VERIFY=1` checks the download.
+  It honours `DSTUI_PREFIX` and `DSTUI_VERSION`, and stages under `$TMPDIR` (default
+  `/var/tmp`). `DSTUI_VERIFY=1` (opt-in) runs `gh attestation verify <download> --repo
+  ksparavec/dstui` first and fails closed: no `gh`, a failed check or any other `DSTUI_VERIFY`
+  value than `0`/`1` means exit 1, nothing run, the download removed.
 - **CI:**
   - Every workflow pins its actions by SHA and checks out without persisting the token (a test
     checks both).
