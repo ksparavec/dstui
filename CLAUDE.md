@@ -84,7 +84,8 @@ Run `make lock` and `make dev-install` first.
   - a root install is root-owned and readable by everyone
   - the payload contains no build-host paths
   - a relative prefix is resolved; a whitespace or too-long prefix is refused before anything
-    is created (the prefix and its parents included)
+    is created (the prefix and its parents included). The shebang limit is counted in bytes,
+    also where `sh` is bash under a UTF-8 locale (there `${#x}` counts characters)
   - a noexec `$TMPDIR` works
   - the staged zstd (`--version`) and interpreter must run before an existing install is
     replaced; a noexec prefix or a musl host means exit 1 with the reason, old install kept

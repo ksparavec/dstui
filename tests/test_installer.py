@@ -471,11 +471,17 @@ def make_extraction_dir(
 
 
 def run_startup(
-    here: Path, tmp_path: Path, *args: str, wrap: tuple[str, ...] = (), **env: str
+    here: Path,
+    tmp_path: Path,
+    *args: str,
+    wrap: tuple[str, ...] = (),
+    shell: str = "sh",
+    **env: str,
 ) -> subprocess.CompletedProcess[str]:
-    """Run startup.sh as makeself does: from ``here``, under umask 077, via ``sh``."""
+    """Run startup.sh as makeself does: from ``here``, under umask 077, via ``sh`` (or
+    ``shell``, as the /bin/sh of another distribution)."""
     base = {"HOME": str(tmp_path / "home"), "PATH": SYSTEM_PATH, "TMPDIR": str(tmp_path)}
-    command = [*wrap, "sh", "-c", 'umask 077 && exec sh ./startup.sh "$@"', "sh", *args]
+    command = [*wrap, "sh", "-c", f'umask 077 && exec {shell} ./startup.sh "$@"', "sh", *args]
     return run_script(command, base | env, cwd=here)
 
 
@@ -588,6 +594,51 @@ def test_startup_refuses_a_prefix_whose_shebang_is_too_long(tmp_path: Path) -> N
     assert result.returncode == 1
     assert "install path too long" in result.stderr
     assert "DSTUI_PREFIX" in result.stderr
+    assert not parent.exists()  # refused before anything was created
+
+
+UTF8 = {"LANG": "C.UTF-8"}
+
+
+def bash_counts_characters() -> bool:
+    """Whether bash, under :data:`UTF8`, gives ``${#x}`` in characters (the case to test)."""
+    bash = shutil.which("bash", path=SYSTEM_PATH)
+    if bash is None:
+        return False
+    probe = run_script([bash, "-c", 'x="é"; echo "${#x}"'], {"PATH": SYSTEM_PATH, **UTF8})
+    return probe.stdout.strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "shell",
+    [
+        "sh",
+        pytest.param(
+            "bash",
+            marks=pytest.mark.skipif(
+                not bash_counts_characters(), reason="needs bash and the C.UTF-8 locale"
+            ),
+        ),
+    ],
+)
+def test_startup_counts_the_shebang_limit_in_bytes_whatever_the_shell(
+    shell: str, tmp_path: Path, short: Path
+) -> None:
+    """The kernel's limit is in bytes. Where /bin/sh is bash (Fedora, RHEL, Arch), ``${#x}``
+    counts characters under a UTF-8 locale: a non-ASCII prefix got past the check, and the
+    launcher it installed could not start."""
+    parent = short / "new"
+    prefix = parent / ("é" * 40)
+    shebang = f"#!{prefix}/lib/dstui/bin/python3.14 -I"
+    assert len(shebang) <= 127 < len(shebang.encode())  # short in characters, long in bytes
+
+    result = run_startup(
+        make_extraction_dir(tmp_path), tmp_path, shell=shell, DSTUI_PREFIX=str(prefix), **UTF8
+    )
+
+    assert result.returncode == 1, result.stdout
+    assert "install path too long" in result.stderr
+    assert f"is {len(shebang.encode())} bytes" in result.stderr
     assert not parent.exists()  # refused before anything was created
 
 
