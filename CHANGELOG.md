@@ -14,12 +14,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `DSTUI_VERIFY=1` checks what it downloaded.
 - **`make lock` can move a locked package.** uv keeps the pins already in the
   lock files, so a plain `make lock` never upgraded one (past an advisory, say).
-  `LOCK_ARGS` passes uv flags to every lock: `make lock
-  LOCK_ARGS='--upgrade-package textual'`, or `--upgrade` to re-resolve everything.
+  `LOCK_ARGS` passes uv flags to every lock, e.g.
+  `make lock LOCK_ARGS='--upgrade-package textual'`, or `--upgrade` to
+  re-resolve everything.
 - **A module that does not compile fails `make package`.** The precompile step
   discarded every error, and the sourceless step then deletes all `.py` files, so
   such a module would have been silently missing from the installer. The build
   now stops with the compiler's error. (Everything compiles today.)
+- **The installer says why a prefix mounted `noexec` fails, and keeps the old
+  install.** It used to fail inside tar with exit 2. It now starts the bundled
+  zstd once first and exits 1 with the reason, as it already did for a bundled
+  Python that cannot run.
+- **A prefix the installer refuses is no longer created.** A prefix with
+  whitespace, or one too long for a `#!` line, was refused only after
+  `mkdir -p` had made it and its missing parents; the checks now run first.
+- **The README described `--target DIR` wrongly.** Without `--` it is
+  makeself's own option: it extracts the raw payload into `DIR`, keeps it there
+  and still installs into the default prefix. Use `DSTUI_PREFIX` or
+  `-- --prefix DIR`.
 
 ## [0.1.0] - 2026-09-24
 

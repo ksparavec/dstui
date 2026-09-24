@@ -304,10 +304,11 @@ and the current directory never reach it. Only `dstui` goes on `PATH`.
 
 The payload is owned by `root:root` with no group or other write bits, and the installer
 extracts it without restoring owners, so the installed tree belongs to whoever installs and is
-readable by everyone. It refuses a prefix with whitespace or one too long for a `#!` line,
-resolves a relative prefix against the directory it was started from, checks that the bundled
-Python runs on the host before replacing an existing install, and works when its temp directory
-is mounted `noexec`. It unpacks under `$TMPDIR`, by default `/var/tmp` (never `/tmp`).
+readable by everyone. It refuses a prefix with whitespace or one too long for a `#!` line
+before it creates anything, resolves a relative prefix against the directory it was started
+from, checks that the bundled zstd and Python run on the host before replacing an existing
+install (a prefix mounted `noexec` is refused with that reason), and works when its temp
+directory is mounted `noexec`. It unpacks under `$TMPDIR`, by default `/var/tmp` (never `/tmp`).
 
 **It does not contain DeepSeek Harness.** `requirements.txt` leaves out
 `deepseek-harness-runtime-bin`, the dependencies install hash-checked with `--no-deps`, and
@@ -322,8 +323,9 @@ sh ./dstui-install.sh --check                        # verify integrity only
 dstui --help
 ```
 
-`--target DIR` (without `--`) is makeself's own option: it only unpacks the raw payload into
-`DIR`. Use `DSTUI_PREFIX` or `-- --prefix DIR`.
+`--target DIR` (without `--`) is makeself's own option: it extracts the raw payload into `DIR`,
+keeps it there, and then still installs into the default prefix (or `DSTUI_PREFIX`). With `--`,
+`--target` reaches the installer, which refuses it. Use `DSTUI_PREFIX` or `-- --prefix DIR`.
 
 Build deps: `uv`, `makeself`, `curl`, `readelf` (binutils), and a C toolchain (to build the static zstd
 once; it is cached under `.cache/`, per version). Run `make lock` and `make dev-install` first.
