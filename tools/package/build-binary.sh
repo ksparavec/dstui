@@ -20,7 +20,7 @@
 # static zstd, so target hosts need neither Python nor zstd. `.py` sources are
 # dropped (sourceless `.pyc` only). makeself provides SHA256 integrity. x86-64.
 # The payload is owned by root:root with modes u+rwX,go+rX,go-w, and carries no
-# build-host path (checked).
+# build-host path (tools/package/check-host-paths.py).
 #
 # Build deps: uv, makeself, curl, gcc/make (to build the static zstd once), readelf.
 # Run `make lock` first (requirements.txt is installed hash-checked, and
@@ -54,6 +54,7 @@ MKDIR="$DIST/.mkself"
 STARTUP_IN="$ROOT/tools/package/startup.sh.in"
 CHECK_NO_RUNTIME="$ROOT/tools/package/check-no-runtime.sh"
 CHECK_PYTHON="$ROOT/tools/package/check-python.sh"
+CHECK_HOST_PATHS="$ROOT/tools/package/check-host-paths.py"
 OUT="$DIST/$APP-install.sh"
 REQ="$ROOT/requirements.txt"
 BUILD_REQ="$ROOT/requirements-build.txt"
@@ -253,11 +254,13 @@ PYEOF
 "$PY" -I -c "import dstui, dstui.app, textual, deepseek_harness" \
     || { echo "ERROR: sourceless bundle not importable" >&2; exit 1; }
 
-# The payload must not disclose the build host (account name, directory layout).
-leak_patterns=(-e "$BASEP" -e "$ROOT/")
-case "${HOME:-/}" in /) ;; *) leak_patterns+=(-e "$HOME/") ;; esac
-leaks="$(grep -rlaF "${leak_patterns[@]}" "$STAGE" || true)"
-[ -z "$leaks" ] || { echo "ERROR: build-host paths in the payload:" >&2; echo "$leaks" >&2; exit 1; }
+# The payload must not disclose the build host (account name, directory layout). Files
+# verified byte for byte against their wheel's RECORD are upstream content and exempt:
+# pydantic_core's SBOM names pydantic's CI checkout, /home/runner/work/..., which is under
+# $HOME/ on a GitHub runner. Whatever the build or pip wrote stays scanned.
+leak_patterns=("$BASEP" "$ROOT/")
+case "${HOME:-/}" in /) ;; *) leak_patterns+=("$HOME/") ;; esac
+"$PY" -I "$CHECK_HOST_PATHS" "$STAGE" "${leak_patterns[@]}"
 
 # --- 8. Obtain a static zstd (cached across builds) --------------------
 # Reused only while it is the pinned version and static (no program interpreter);
